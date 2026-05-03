@@ -55,6 +55,9 @@ export const Interaction = class {
     /** @type {number|null} Distance from the look-at target. @private */
     static #orbitRadius = null;
 
+    /** @type {number|null} Target zoom radius — actual radius lerps toward this for smooth zoom. @private */
+    static #orbitRadiusTarget = null;
+
     /** @type {number} Look-at target X. @private */
     static #orbitTargetX = 0;
 
@@ -107,15 +110,17 @@ export const Interaction = class {
         const centerY = snap?.centerY ?? snap?.center?.y ?? 0;
         const centerZ = snap?.centerZ ?? snap?.center?.z ?? 0;
 
-        if (eyeX === 0 && eyeY === 0 &&
+        if (eyeX === 0 && eyeY === 0 && eyeZ === 0 &&
             centerX === 0 && centerY === 0 && centerZ === 0) {
-            // Sync projection to live canvas size (pass aspect=null so Camera
-            // reads the canvas dimensions each frame, avoiding squashed shapes).
+            // No camera has been placed yet — set up the p5.js-compatible default:
+            // fovy = PI/3 (60°), camera pulled back so the canvas height fills the view.
             const canvas = typeof Canvex !== 'undefined' ? Canvex.canvas : null;
             const canvasHeight = canvas ? canvas.height : 400;
-            const cameraZ = (canvasHeight / 2) / Math.tan(Math.PI / 4);
-            const fovy = 2 * Math.atan((canvasHeight / 2) / cameraZ);
-            Camera.perspective(fovy, null, 0.1, 10000);
+            const aspect = canvas ? canvas.width / canvas.height : 1;
+            const fovy = Math.PI / 3;
+            const cameraZ = (canvasHeight / 2) / Math.tan(fovy / 2);
+            Camera.perspective(fovy, aspect, 0.1, 10000);
+            Camera.camera(0, 0, cameraZ, 0, 0, 0, 0, 1, 0);
             return Camera.snapshot();
         }
 
@@ -440,15 +445,17 @@ export const Interaction = class {
         // looking at origin), reposition it to the canvas-proportional distance
         // so shapes fill the viewport exactly as the reference images show.
         const isFactoryDefault =
-            ex === 0 && ey === 0 &&
+            ex === 0 && ey === 0 && ez === 800 &&
             cx === 0 && cy === 0 && cz === 0;
-        if (isFactoryDefault) {
+        if (isFactoryDefault) { 
             const canvas = typeof Canvex !== 'undefined' ? Canvex.canvas : null;
             const canvasHeight = canvas ? canvas.height : 400;
-            ez = (canvasHeight / 2) / Math.tan(Math.PI / 6); // tan(30°)
-            const fovy = 2 * Math.atan((canvasHeight / 2) / ez);
-            Camera.perspective(fovy, null, 0.1, 10000);
+            const aspect = canvas ? canvas.width / canvas.height : 1;
+            const fovy = 2 * Math.atan(canvasHeight / 2 / 800);
+            ez = (canvasHeight / 2) / Math.tan(fovy / 2);
+            Camera.perspective(fovy, aspect, 0.1, 10000);
             Camera.camera(0, 0, ez, 0, 0, 0, 0, 1, 0);
+
         }
 
         // Store the look-at target
@@ -462,6 +469,7 @@ export const Interaction = class {
         const dz = ez - cz;
 
         this.#orbitRadius = Math.hypot(dx, dy, dz) || 200;
+        this.#orbitRadiusTarget = this.#orbitRadius;
 
         // φ: angle from +Y axis down toward the XZ plane.
         // When the camera is on the Z-axis (dy === 0) force exactly π/2 so
@@ -487,6 +495,12 @@ export const Interaction = class {
      * @private
      */
     static #orbitApplyCamera() {
+        // Smoothly interpolate actual radius toward the target (ease-out zoom).
+        if (this.#orbitRadiusTarget !== null && this.#orbitRadius !== null) {
+            const lerpFactor = 0.12; // lower = smoother / slower; higher = snappier
+            this.#orbitRadius += (this.#orbitRadiusTarget - this.#orbitRadius) * lerpFactor;
+        }
+
         const r      = this.#orbitRadius;
         const phi    = this.#orbitPhi;
         const th     = this.#orbitTheta;
@@ -714,7 +728,8 @@ export const Interaction = class {
             e.preventDefault();
             // deltaY > 0 → zoom out (increase radius); < 0 → zoom in
             const factor = 1 + e.deltaY * 0.001 * this.#orbitSensitivityZ;
-            this.#orbitRadius = Math.max(1, this.#orbitRadius * factor);
+            // Update the target; the actual radius lerps toward it each frame for smooth zoom.
+            this.#orbitRadiusTarget = Math.max(10, this.#orbitRadiusTarget * factor);
         };
 
         // ── Touch start ───────────────────────────────────────────────────────
@@ -742,7 +757,7 @@ export const Interaction = class {
                 if (this.#orbitLastPinchDist !== null) {
                     const ratio  = this.#orbitLastPinchDist / dist; // >1 pinch in, <1 spread
                     const scaled = 1 + (ratio - 1) * this.#orbitSensitivityZ;
-                    this.#orbitRadius = Math.max(1, this.#orbitRadius * scaled);
+                    this.#orbitRadiusTarget = Math.max(10, this.#orbitRadiusTarget * scaled);
                 }
                 this.#orbitLastPinchDist = dist;
             }

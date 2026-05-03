@@ -1,3 +1,5 @@
+import { Canvas } from "./canvas.js";
+import { Shapes } from "./shapes.js";
 /**
  * Lightweight sketch manager with a p5-style `setup()` / `draw()` lifecycle.
  *
@@ -390,9 +392,12 @@ void main() {
                 depth: true,
                 stencil: true,
                 premultipliedAlpha: true,
-                preserveDrawingBuffer: false
+                preserveDrawingBuffer: false,
+                willReadFrequently: true 
             }
-            : undefined;
+            : {
+                willReadFrequently: true 
+            };
 
         const context = canvas.getContext(nextMode, contextAttributes);
         if (!context) {
@@ -456,18 +461,299 @@ void main() {
     }
 
     /**
-     * Fills the full canvas with a solid color.
-     * @param {string | CanvasGradient | CanvasPattern} [color='#000'] Fill source.
+     * Draws a background over the full canvas.
+     *
+     * Supported types:
+     * - `solid`  : fills the whole canvas with one color.
+     * - `grid`   : fills the canvas, then draws a square grid. Defaults to 32×32 cells.
+     * - `checker`: fills alternating square cells. Defaults to 32×32 cells.
+     * - `dots`   : fills the canvas, then places dots at grid intersections.
+     *
+     * Works for Canvas 2D **and** WebGL / WebGL2 contexts.
+     *
+     * @param {string | CanvasGradient | CanvasPattern} [color='#000'] Main fill source.
+     * @param {'solid'|'grid'|'checker'|'dots'|{type?: string, color?: string | CanvasGradient | CanvasPattern, size?: number, cellSize?: number, gridSize?: number, lineColor?: string, stroke?: string, lineWidth?: number, alternateColor?: string, dotColor?: string, dotRadius?: number}} [type='solid'] Background type, or an options object.
+     * @param {{size?: number, cellSize?: number, gridSize?: number, lineColor?: string, stroke?: string, lineWidth?: number, alternateColor?: string, dotColor?: string, dotRadius?: number}} [options={}] Extra options for patterned backgrounds.
      * @returns {void}
      */
-    static background(color = '#000') {
+    static background(color = '#000', type = 'solid', options = {}) {
         const ctx = Canvex.#ctx;
-        if (!Canvex.#isCanvas2D(ctx)) return;
-        ctx.save();
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.fillStyle = color;
-        ctx.fillRect(0, 0, Canvex.width, Canvex.height);
-        ctx.restore();
+
+        const settings = (type && typeof type === 'object') ? type : options;
+        const backgroundType = String(
+            (type && typeof type === 'object' ? type.type : type) || 'solid'
+        ).toLowerCase();
+        const fillSource = settings?.color ?? color;
+        const cellSize = Math.max(1, Number(settings?.cellSize ?? settings?.gridSize ?? settings?.size ?? 32) || 32);
+
+        // ── Canvas 2D path ────────────────────────────────────────────────────
+        if (Canvex.#isCanvas2D(ctx)) {
+            // Use the native ctx save/restore (transform + style state only) rather
+            // than Canvas.save()/restore(), which snapshots and restores pixel data —
+            // that would erase the background we are about to draw.
+            ctx.save();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+            // Always paint the base layer first so every background type fully covers the canvas.
+            Canvas.fill(fillSource);
+            Shapes.rect(0, 0, Canvex.width, Canvex.height);
+
+            switch (backgroundType) {
+                case 'solid':
+                    break;
+
+                case 'grid': {
+                    const lineWidth = Math.max(0.1, Number(settings?.lineWidth ?? 1) || 1);
+                    const offset = lineWidth % 2 === 1 ? 0.5 : 0;
+
+                    Canvas.strokeWeight(lineWidth);
+                    Canvas.stroke(settings?.lineColor ?? settings?.stroke ?? 'rgba(255, 255, 255, 0.18)');
+                    Canvas.noFill();
+                    for (let x = 0; x <= Canvex.width; x += cellSize) {
+                        const px = Math.round(x) + offset;
+                        Shapes.line(px, 0, px, Canvex.height);
+                    }
+                    for (let y = 0; y <= Canvex.height; y += cellSize) {
+                        const py = Math.round(y) + offset;
+                        Shapes.line(0, py, Canvex.width, py);
+                    }
+                    break;
+                }
+
+                case 'checker': {
+                    Canvas.fill(settings?.alternateColor ?? 'rgba(255, 255, 255, 0.12)');
+                    Canvas.noStroke();
+                    for (let y = 0; y < Canvex.height; y += cellSize) {
+                        for (let x = 0; x < Canvex.width; x += cellSize) {
+                            if (((x / cellSize) + (y / cellSize)) % 2 === 0) {
+                                Shapes.rect(x, y, cellSize, cellSize);
+                            }
+                        }
+                    }
+                    break;
+                }
+
+                case 'dots': {
+                    const radius = Math.max(0.5, Number(settings?.dotRadius ?? 2) || 2);
+                    Canvas.fill(settings?.dotColor ?? settings?.lineColor ?? 'rgba(255, 255, 255, 0.35)');
+                    Canvas.noStroke();
+                    for (let y = 0; y <= Canvex.height; y += cellSize) {
+                        for (let x = 0; x <= Canvex.width; x += cellSize) {
+                            Shapes.arc(x, y, radius * 2, radius * 2, 0, Math.PI * 2);
+                        }
+                    }
+                    break;
+                }
+
+                default:
+                    throw new Error(`Unknown background type: ${backgroundType}`);
+            }
+
+            ctx.restore();
+
+            // Re-apply Canvas-managed fill/stroke styles onto the native context.
+            // ctx.restore() reverts ctx.fillStyle/strokeStyle to whatever they were
+            // before the save(), which can diverge from Canvas._fillStyleValue /
+            // Canvas._strokeStyleValue (e.g. after Canvas.fill(), Canvas.noFill(), etc.).
+            // Calling _syncDrawState() here keeps the native context in sync so the
+            // next drawing call uses the correct user-set fill and stroke colors.
+            Canvas._syncDrawState(ctx);
+            return;
+        }
+
+        // ── WebGL / WebGL2 path ───────────────────────────────────────────────
+        if (Canvex.#isWebGL1(ctx) || Canvex.#isWebGL2(ctx)) {
+            const gl = ctx;
+            const W = Canvex.width;
+            const H = Canvex.height;
+
+            /**
+             * Parse any color value that Canvex accepts into a [r,g,b,a] float
+             * array with components in the 0–1 range, using Canvas._resolveColorGL
+             * so the same color syntax works here as everywhere else.
+             * @param {*} colorValue
+             * @returns {[number, number, number, number]}
+             */
+            const toGL = (colorValue) => {
+                const arr = Canvas._resolveColorGL([colorValue], [0]);
+                return arr;
+            };
+
+            /**
+             * Draw a filled quad (two triangles covering x0,y0 → x1,y1) using
+             * the currently-bound program's u_color uniform and a_position attribute.
+             * Coordinates are in pixel space — the fallback vertex shader converts
+             * them to clip space automatically via u_resolution.
+             * @param {number} x0
+             * @param {number} y0
+             * @param {number} x1
+             * @param {number} y1
+             * @param {[number,number,number,number]} rgba
+             */
+            const glRect = (x0, y0, x1, y1, rgba) => {
+                Canvex.ensureWebGLProgram(gl);
+                const program = gl.getParameter(gl.CURRENT_PROGRAM);
+                if (!program) return;
+
+                const colorLoc = gl.getUniformLocation(program, 'u_color');
+                if (colorLoc) gl.uniform4f(colorLoc, rgba[0], rgba[1], rgba[2], rgba[3]);
+
+                const posLoc = gl.getAttribLocation(program, 'a_position');
+                if (posLoc < 0) return;
+
+                // Two triangles: (x0,y0)→(x1,y0)→(x0,y1)  +  (x0,y1)→(x1,y0)→(x1,y1)
+                const verts = new Float32Array([
+                    x0, y0,  x1, y0,  x0, y1,
+                    x0, y1,  x1, y0,  x1, y1,
+                ]);
+
+                const buf = gl.createBuffer();
+                if (!buf) return;
+                gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+                gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+                gl.enableVertexAttribArray(posLoc);
+                gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+                gl.drawArrays(gl.TRIANGLES, 0, 6);
+                gl.deleteBuffer(buf);
+            };
+
+            /**
+             * Draw a line segment using gl.LINES.
+             * @param {number} x0
+             * @param {number} y0
+             * @param {number} x1
+             * @param {number} y1
+             * @param {[number,number,number,number]} rgba
+             */
+            const glLine = (x0, y0, x1, y1, rgba) => {
+                Canvex.ensureWebGLProgram(gl);
+                const program = gl.getParameter(gl.CURRENT_PROGRAM);
+                if (!program) return;
+
+                const colorLoc = gl.getUniformLocation(program, 'u_color');
+                if (colorLoc) gl.uniform4f(colorLoc, rgba[0], rgba[1], rgba[2], rgba[3]);
+
+                const posLoc = gl.getAttribLocation(program, 'a_position');
+                if (posLoc < 0) return;
+
+                const verts = new Float32Array([x0, y0, x1, y1]);
+                const buf = gl.createBuffer();
+                if (!buf) return;
+                gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+                gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+                gl.enableVertexAttribArray(posLoc);
+                gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+                gl.drawArrays(gl.LINES, 0, 2);
+                gl.deleteBuffer(buf);
+            };
+
+            /**
+             * Approximate a filled circle with a triangle fan.
+             * @param {number} cx
+             * @param {number} cy
+             * @param {number} r
+             * @param {[number,number,number,number]} rgba
+             * @param {number} [segments=20]
+             */
+            const glCircle = (cx, cy, r, rgba, segments = 20) => {
+                Canvex.ensureWebGLProgram(gl);
+                const program = gl.getParameter(gl.CURRENT_PROGRAM);
+                if (!program) return;
+
+                const colorLoc = gl.getUniformLocation(program, 'u_color');
+                if (colorLoc) gl.uniform4f(colorLoc, rgba[0], rgba[1], rgba[2], rgba[3]);
+
+                const posLoc = gl.getAttribLocation(program, 'a_position');
+                if (posLoc < 0) return;
+
+                // Center + one vertex per segment + closing vertex
+                const verts = new Float32Array((segments + 2) * 2);
+                verts[0] = cx;
+                verts[1] = cy;
+                for (let i = 0; i <= segments; i++) {
+                    const angle = (i / segments) * Math.PI * 2;
+                    verts[(i + 1) * 2]     = cx + Math.cos(angle) * r;
+                    verts[(i + 1) * 2 + 1] = cy + Math.sin(angle) * r;
+                }
+
+                const buf = gl.createBuffer();
+                if (!buf) return;
+                gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+                gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+                gl.enableVertexAttribArray(posLoc);
+                gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+                gl.drawArrays(gl.TRIANGLE_FAN, 0, segments + 2);
+                gl.deleteBuffer(buf);
+            };
+
+            // Ensure the program is active and uniforms are up to date before
+            // we start issuing draw calls.
+            Canvex.ensureWebGLProgram(gl);
+            Canvex.syncDefaultWebGLState(gl);
+
+            // Disable depth-write for the background so it always stays behind
+            // any geometry drawn later in the same frame.
+            gl.depthMask(false);
+
+            // Step 1: clear + paint the base color as a full-screen quad.
+            //         We use clearColor+clear rather than a quad so that the
+            //         solid-only path stays as cheap as possible.
+            const baseRGBA = toGL(fillSource);
+            gl.clearColor(baseRGBA[0], baseRGBA[1], baseRGBA[2], baseRGBA[3]);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+            switch (backgroundType) {
+                case 'solid':
+                    break;
+
+                case 'grid': {
+                    const lineColor = settings?.lineColor ?? settings?.stroke ?? 'rgba(255,255,255,0.18)';
+                    const lineRGBA  = toGL(lineColor);
+                    for (let x = 0; x <= W; x += cellSize) {
+                        glLine(x, 0, x, H, lineRGBA);
+                    }
+                    for (let y = 0; y <= H; y += cellSize) {
+                        glLine(0, y, W, y, lineRGBA);
+                    }
+                    break;
+                }
+
+                case 'checker': {
+                    const altRGBA = toGL(settings?.alternateColor ?? 'rgba(255,255,255,0.12)');
+                    for (let y = 0; y < H; y += cellSize) {
+                        for (let x = 0; x < W; x += cellSize) {
+                            if (((x / cellSize) + (y / cellSize)) % 2 === 0) {
+                                glRect(x, y, x + cellSize, y + cellSize, altRGBA);
+                            }
+                        }
+                    }
+                    break;
+                }
+
+                case 'dots': {
+                    const dotRadius = Math.max(0.5, Number(settings?.dotRadius ?? 2) || 2);
+                    const dotRGBA   = toGL(settings?.dotColor ?? settings?.lineColor ?? 'rgba(255,255,255,0.35)');
+                    for (let y = 0; y <= H; y += cellSize) {
+                        for (let x = 0; x <= W; x += cellSize) {
+                            glCircle(x, y, dotRadius, dotRGBA);
+                        }
+                    }
+                    break;
+                }
+
+                default:
+                    gl.depthMask(true);
+                    throw new Error(`Unknown background type: ${backgroundType}`);
+            }
+
+            // Restore depth-mask so subsequent geometry draws work normally.
+            gl.depthMask(true);
+
+            // Re-sync the fallback program uniforms (u_color etc.) so the user's
+            // next draw call starts with a clean slate.
+            Canvex.syncDefaultWebGLState(gl);
+            return;
+        }
     }
 
     static clear() {

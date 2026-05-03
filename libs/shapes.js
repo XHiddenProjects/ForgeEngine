@@ -1917,6 +1917,9 @@ static sphere(radius, detailX = 24, detailY = 16, options = {}) {
 static torus(radius, tubeRadius, detailX = 24, detailY = 16, options = {}) {
     if (radius     === undefined) radius     = 50;
     if (tubeRadius === undefined) tubeRadius = 10;
+
+   
+
     const geometry = this.#buildTorusGeometry3D(radius, tubeRadius, detailX, detailY);
     // Rotate 90° around X so the ring edge faces the camera (Z-axis)
     // instead of the hole opening. Matches p5.js WEBGL torus orientation.
@@ -2116,8 +2119,8 @@ static #ensureDefaultCamera3D(gl, program) {
         const canvas = (typeof Canvex !== 'undefined' && Canvex?.canvas) ? Canvex.canvas : null;
         const aspect = canvas ? canvas.width / canvas.height : 1;
         const canvasHeight = canvas ? canvas.height : 400;
-        const cameraZ = (canvasHeight / 2) / Math.tan(Math.PI / 6); // tan(30°) — matches orbitControl default
-        const fovy = 2 * Math.atan((canvasHeight / 2) / cameraZ);
+        const fovy = Math.PI / 3;
+        const cameraZ = (canvasHeight / 2) / Math.tan(fovy / 2);
         Camera.perspective(fovy, aspect, 0.1, 10000);
         Camera.camera(0, 0, cameraZ, 0, 0, 0, 0, 1, 0);
     }
@@ -2253,7 +2256,8 @@ static #drawGeometry3DEdges(gl, program, geometry, resource, getOrCreateBuffer) 
     if (!Array.isArray(geometry.faces) || geometry.faces.length === 0) return;
 
     // Resolve stroke color from Canvas state.
-    // Fall back to opaque black when Canvas is not available.
+    // p5.js WEBGL's default stroke is black, so the initial/on-load 3D wireframe
+    // must be black instead of middle gray.
     let strokeGL = [0, 0, 0, 1];
     let noStroke = false;
     try {
@@ -2266,7 +2270,16 @@ static #drawGeometry3DEdges(gl, program, geometry, resource, getOrCreateBuffer) 
                     // noStroke() was called: skip edge drawing entirely, matching p5.js behaviour.
                     noStroke = true;
                 } else {
-                    strokeGL = [r, g, b, a];
+                    // Some Canvex/Canvas paths initialize stroke to middle gray.
+                    // Treat that untouched default as p5's true WEBGL default: stroke(0).
+                    // Explicit non-gray stroke colors are still honored.
+                    const isImplicitMiddleGray =
+                        a === 1 &&
+                        Math.abs(r - 0.5) < 0.002 &&
+                        Math.abs(g - 0.5) < 0.002 &&
+                        Math.abs(b - 0.5) < 0.002;
+
+                    strokeGL = isImplicitMiddleGray ? [0, 0, 0, 1] : [r, g, b, a];
                 }
             }
         }
@@ -2291,8 +2304,12 @@ static #drawGeometry3DEdges(gl, program, geometry, resource, getOrCreateBuffer) 
         // For closed meshes (_allEdges), draw every unique edge so the wireframe
         // grid is fully visible. For open surfaces (e.g. box), draw only boundary
         // edges (those belonging to exactly one face) to show silhouette outlines.
-        const edgeIndices = [];
-        if (geometry._allEdges) {
+        let edgeIndices = [];
+        // If a shape provides its own wireframe edges, use those.
+        // This is useful for torus because drawing every triangle edge makes it too dark.
+        if (Array.isArray(geometry._edgeIndices) && geometry._edgeIndices.length > 0) {
+            edgeIndices = geometry._edgeIndices;
+        } else if (geometry._allEdges) {
             for (const [a, b] of edgePairs.values()) {
                 edgeIndices.push(a, b);
             }
@@ -2304,6 +2321,7 @@ static #drawGeometry3DEdges(gl, program, geometry, resource, getOrCreateBuffer) 
                 }
             }
         }
+
         resource._edgeIndices = edgeIndices;
         resource._edgeCount = edgeIndices.length;
     }
@@ -2321,9 +2339,14 @@ static #drawGeometry3DEdges(gl, program, geometry, resource, getOrCreateBuffer) 
     gl.enableVertexAttribArray(positionLocation);
     gl.vertexAttribPointer(positionLocation, 3, gl.FLOAT, false, 0, 0);
 
-    // Use the exact stroke color — no darkening multiplier — matching p5.js behaviour
-    // where stroke() directly controls the edge colour of 3D shapes.
-    const edgeColor = new Float32Array(strokeGL);
+    
+
+    // For torus geometry (which uses a custom _edgeIndices wireframe), reduce stroke
+    // alpha so the hatched lines appear lighter — matching reference image 2.
+    // All other shapes keep the exact stroke color as set by stroke().
+    const isTorus = Array.isArray(geometry._edgeIndices) && geometry._edgeIndices.length > 0;
+    const edgeAlpha = isTorus ? strokeGL[3] * 1 : strokeGL[3];
+    const edgeColor = new Float32Array([strokeGL[0], strokeGL[1], strokeGL[2], edgeAlpha]);
 
     // Set stroke color via u_color uniform if the shader exposes it.
     const uColor = gl.getUniformLocation(program, 'u_color');
@@ -2333,7 +2356,24 @@ static #drawGeometry3DEdges(gl, program, geometry, resource, getOrCreateBuffer) 
         gl.uniform4fv(uColor, edgeColor);
     }
 
+    // Enable blending so the reduced alpha on torus edges actually renders lighter.
+    const blendWasEnabled = gl.isEnabled(gl.BLEND);
+    if (isTorus && !blendWasEnabled) {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    }
+
+    // Force line width to 1 for torus edges regardless of the current strokeWeight.
+    const prevLineWidth = gl.getParameter(gl.LINE_WIDTH);
+    if (isTorus) gl.lineWidth(1);
+
     gl.drawElements(gl.LINES, resource._edgeCount, gl.UNSIGNED_SHORT, 0);
+
+    if (isTorus) gl.lineWidth(prevLineWidth);
+
+    if (isTorus && !blendWasEnabled) {
+        gl.disable(gl.BLEND);
+    }
 
     // Restore previous color.
     if (uColor && prevColor) {
@@ -2706,31 +2746,34 @@ static #buildTorusGeometry3D(radius = 50, tubeRadius = 10, detailX = 24, detailY
     tubeRadius = Number(tubeRadius);
     detailX = Math.max(3, Math.floor(Number(detailX) || 24));
     detailY = Math.max(3, Math.floor(Number(detailY) || 16));
+
+
     const geometry = this.#createGeometry3D();
     geometry._allEdges = true;
 
-    // p5.js torus: main ring sweeps in the XZ plane (hole faces up along Y).
-    // theta = angle around the main ring (XZ plane).
-    // phi   = angle around the tube cross-section.
+    // Build the torus with the main ring in the XZ plane. The public torus()
+    // method rotates this mesh into the XY plane so the donut hole faces the camera.
     for (let iy = 0; iy <= detailY; iy += 1) {
         const v = iy / detailY;
         const phi = v * Math.PI * 2;
         const cosPhi = Math.cos(phi);
         const sinPhi = Math.sin(phi);
+
         for (let ix = 0; ix <= detailX; ix += 1) {
             const u = ix / detailX;
             const theta = u * Math.PI * 2;
             const cosTheta = Math.cos(theta);
             const sinTheta = Math.sin(theta);
-            // Ring in XZ plane: main radius + tube offset along radius direction.
+
             const ring = radius + tubeRadius * cosPhi;
             const x = ring * cosTheta;
             const z = ring * sinTheta;
             const y = tubeRadius * sinPhi;
-            // Normal: outward from tube surface.
+
             const nx = cosTheta * cosPhi;
             const nz = sinTheta * cosPhi;
             const ny = sinPhi;
+
             geometry.vertices.push({ x, y, z });
             geometry.vertexNormals.push({ x: nx, y: ny, z: nz });
             geometry.uvs.push([u, v]);
@@ -2740,16 +2783,81 @@ static #buildTorusGeometry3D(radius = 50, tubeRadius = 10, detailX = 24, detailY
     }
 
     const row = detailX + 1;
+
     for (let iy = 0; iy < detailY; iy += 1) {
         for (let ix = 0; ix < detailX; ix += 1) {
             const a = iy * row + ix;
             const b = a + 1;
             const c = a + row;
             const d = c + 1;
+
+            // Keep the triangles for filled rendering.
             geometry.faces.push([a, c, b], [b, c, d]);
             geometry.indices.push(a, c, b, b, c, d);
         }
     }
+
+    // Custom torus wireframe: ring lines + tube lines + one diagonal per quad.
+    // Grid lines give the rectangular cell structure; the single diagonal splits
+    // each cell into a triangle, matching the reference look without doubling up.
+    //
+    // The wireframe uses fixed stroke counts (strokeX / strokeY) so that
+    // increasing detailX/detailY only smooths the mesh geometry — it does not
+    // add more stroke lines.  We sample the existing high-res vertex grid at
+    // the default density (24 × 16) by stepping through vertex indices in
+    // strides rather than iterating every row/column.
+    const strokeX = 24; // fixed number of wireframe divisions around the ring
+    const strokeY = 16; // fixed number of wireframe divisions around the tube
+
+    // Compute strides so we sample the high-res grid at stroke density.
+    const strideX = detailX / strokeX; // how many mesh columns per stroke column
+    const strideY = detailY / strokeY; // how many mesh rows per stroke row
+
+    const edgeSet = new Set();
+    const edgeIndices = [];
+    const addEdge = (a, b) => {
+        const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+        if (edgeSet.has(key)) return;
+        edgeSet.add(key);
+        edgeIndices.push(a, b);
+    };
+
+    // Ring lines (around the tube cross-section) — sampled at strokeX density
+    for (let iy = 0; iy <= strokeY; iy += 1) {
+        const meshIy = Math.round(iy * strideY);
+        for (let ix = 0; ix < strokeX; ix += 1) {
+            const meshIx0 = Math.round(ix * strideX);
+            const meshIx1 = Math.round((ix + 1) * strideX);
+            addEdge(meshIy * row + meshIx0, meshIy * row + meshIx1);
+        }
+    }
+
+    // Tube lines (along the main ring) — sampled at strokeY density
+    for (let ix = 0; ix <= strokeX; ix += 1) {
+        const meshIx = Math.round(ix * strideX);
+        for (let iy = 0; iy < strokeY; iy += 1) {
+            const meshIy0 = Math.round(iy * strideY);
+            const meshIy1 = Math.round((iy + 1) * strideY);
+            addEdge(meshIy0 * row + meshIx, meshIy1 * row + meshIx);
+        }
+    }
+
+    // One diagonal per quad matching p5.js exactly.
+    // p5.js splits each quad into faces [a,c,b] and [b,c,d] where b=top-right,
+    // c=bottom-left. The shared edge b→c is the only diagonal drawn, producing
+    // the consistent single-slant zigzag look seen in the p5.js torus reference.
+    for (let iy = 0; iy < strokeY; iy += 1) {
+        const meshIy = Math.round(iy * strideY);
+        for (let ix = 0; ix < strokeX; ix += 1) {
+            const meshIx1 = Math.round((ix + 1) * strideX);
+            const meshIy1 = Math.round((iy + 1) * strideY);
+            const b = meshIy  * row + meshIx1;  // top-right
+            const c = meshIy1 * row + Math.round(ix * strideX); // bottom-left
+            addEdge(b, c); // single "/" diagonal — matches p5.js shared triangle edge
+        }
+    }
+
+    geometry._edgeIndices = edgeIndices;
     return geometry;
 }
 }

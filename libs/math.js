@@ -348,12 +348,23 @@ export const math = class{
         return Math.pow(base, exponent);
     }
     /**
-     * Rounds a number to the nearest integer.
-     * @param {number} value The number to round.
+     * Rounds a number to the specified number of decimal places.
+     *
+     * @param {number} value - The number to round.
+     * @param {number} [digits=0] - Number of decimal places to round to. (Default is 0)
      * @returns {number} The rounded value.
+     *
+     * @example
+     * math.round(12.3456);
+     * // returns 12
+     *
+     * @example
+     * math.round(12.3456, 2);
+     * // returns 12.35
      */
-    static round(value){
-        return Math.round(value);
+    static round(value, digits = 0) {
+        const factor = math.pow(10,digits);
+        return Math.round(value * factor) / factor;
     }
     /**
      * Returns the square of a number.
@@ -378,5 +389,102 @@ export const math = class{
      */
     static frac(value){
         return value - Math.floor(value);
+    }
+
+    /**
+     * Calculates the Levenshtein distance between two strings using O(min(m, n)) space.
+     *
+     * The Levenshtein distance is the minimum number of single-character edits
+     * needed to transform one string into another, where edits may be insertions,
+     * deletions, or substitutions.
+     *
+     * @param {string} a - The first string.
+     * @param {string} b - The second string.
+     * @returns {number} The minimum edit distance between `a` and `b`.
+     *
+     * @example
+     * levenshtein("hello", "hallo");
+     * // returns 1
+     *
+     * @example
+     * levenshtein("gumbo", "gambol");
+     * // returns 2
+     */
+    static levenshtein(a, b) {
+        if (a.length < b.length) [a, b] = [b, a];
+        let previous = Array.from({ length: b.length + 1 }, (_, i) => i);
+        for (let i = 1; i <= a.length; i++) {
+            const current = [i];
+            for (let j = 1; j <= b.length; j++) {
+            const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+            current[j] = math.min(
+                previous[j] + 1,        // deletion
+                current[j - 1] + 1,     // insertion
+                previous[j - 1] + cost  // substitution
+            );
+            }
+            previous = current;
+        }
+        return previous[b.length];
+    }
+    /**
+     * Calculates the great-circle distance between two geographic coordinates
+     * using the Haversine formula.
+     *
+     * @param {number} lat1 - Latitude of the first point in decimal degrees.
+     * @param {number} lon1 - Longitude of the first point in decimal degrees.
+     * @param {number} lat2 - Latitude of the second point in decimal degrees.
+     * @param {number} lon2 - Longitude of the second point in decimal degrees.
+     * @param {"km" | "mi"} [unit="km"] - Unit for the returned distance.
+     * @returns {number} Distance between the two points in the selected unit.
+     *
+     * @example
+     * math.haversineDistance(40.7128, -74.0060, 34.0522, -118.2437);
+     * // returns approximately 3935.75
+     *
+     * @example
+     * math.haversineDistance(40.7128, -74.0060, 34.0522, -118.2437, "mi");
+     * // returns approximately 2445.56
+     */
+    static haversineDistance(lat1, lon1, lat2, lon2, unit = "km") {
+        const earthRadius = unit === "mi" ? 3958.8 : 6371;
+        const dLat = math.radians(lat2 - lat1);
+        const dLon = math.radians(lon2 - lon1);
+        const rLat1 = math.radians(lat1);
+        const rLat2 = math.radians(lat2);
+        const a =
+            math.pow(math.sin(dLat / 2),2) +
+            math.cos(rLat1) *
+            math.cos(rLat2) *
+            math.pow(math.sin(dLon / 2),2);
+
+        const c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+
+        return earthRadius * c;
+    }
+    /**
+     * Returns the sine of a number.
+     * @param {Number} x A numeric expression that contains an angle measured in radians.
+     * @returns {Number}
+     */
+    static sin(x){
+        return Math.sin(x);
+    }
+    /**
+     * Returns the cosine of a number.
+     * @param {Number} x A numeric expression that contains an angle measured in radians.
+     * @returns {Number}
+     */
+    static cos(x){
+        return Math.cos(x);
+    }
+    /**
+     * Returns the angle (in radians) between the X axis and the line going through both the origin and the given point.
+     * @param {Number} y A numeric expression representing the cartesian y-coordinate.
+     * @param {Number} x A numeric expression representing the cartesian x-coordinate.
+     * @returns {Number}
+     */
+    static atan2(y,x){
+        return Math.atan2(y,x);
     }
 }

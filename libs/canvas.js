@@ -19,6 +19,7 @@ export const Canvas = class {
     static TOP = 'top';
     static BOTTOM = 'bottom';
     static BASELINE = 'baseline';
+    static MIDDLE = 'middle';
     static WORD = 'word';
     static CHAR = 'char';
     static NORMAL = 'normal';
@@ -71,6 +72,7 @@ export const Canvas = class {
     static _strokeEnabled = true;
     static _fillStyleValue = 'rgba(255, 255, 255, 1)';
     static _strokeStyleValue = 'rgba(0, 0, 0, 1)';
+    static _savedCanvasStates = [];
     // WebGL-compatible RGBA arrays (values in 0–1 range) mirrored from fill/stroke calls.
     static _fillColorGL = [1, 1, 1, 1];
     static _strokeColorGL = [0, 0, 0, 1];
@@ -901,7 +903,59 @@ export const Canvas = class {
          */
 
     static save() {
-        return this._ctx().save();
+        const ctx = this._ctx();
+        const entry = {
+            contextWasSaved: false,
+            imageData: null,
+            width: 0,
+            height: 0,
+            drawState: {
+                fillEnabled: this._fillEnabled,
+                strokeEnabled: this._strokeEnabled,
+                fillStyle: this._fillStyleValue,
+                strokeStyle: this._strokeStyleValue,
+                fillColorGL: Array.isArray(this._fillColorGL) ? [...this._fillColorGL] : this._fillColorGL,
+                strokeColorGL: Array.isArray(this._strokeColorGL) ? [...this._strokeColorGL] : this._strokeColorGL,
+                ellipseMode: this._ellipseModeValue,
+                rectMode: this._rectModeValue,
+                smooth: this._smoothValue,
+                strokeMode: this._strokeModeValue,
+                curveDetail: this._curveDetailValue,
+                textAlignHorizontal: this._textAlignHorizontal,
+                textAlignVertical: this._textAlignVertical,
+                textSizePixels: this._textSizePixels,
+                textStyleValue: this._textStyleValue,
+                textLeadingPixels: this._textLeadingPixels,
+                textWrapValue: this._textWrapValue,
+                textFontFamily: this._textFontFamily,
+                textDirectionValue: this._textDirectionValue,
+                textPropertyState: { ...this._textPropertyState }
+            }
+        };
+
+        // Keep the normal rendering-context save behavior for transforms,
+        // clipping regions, alpha, styles, and other context settings.
+        if (typeof ctx.save === 'function') {
+            ctx.save();
+            entry.contextWasSaved = true;
+        }
+
+        // ctx.save() does not save the actual pixels on the canvas. For a 2D
+        // canvas, capture a bitmap snapshot so restore() can return to the
+        // last saved drawing.
+        if (this._isCanvas2DContext(ctx) && typeof ctx.getImageData === 'function') {
+            const canvas = ctx.canvas || Canvex.canvas;
+            const width = Math.max(0, Math.floor(Number(canvas?.width ?? Canvex.width ?? 0)));
+            const height = Math.max(0, Math.floor(Number(canvas?.height ?? Canvex.height ?? 0)));
+            if (width > 0 && height > 0) {
+                entry.width = width;
+                entry.height = height;
+                entry.imageData = ctx.getImageData(0, 0, width, height);
+            }
+        }
+
+        this._savedCanvasStates.push(entry);
+        return entry;
     }
 
     /**
@@ -917,7 +971,47 @@ export const Canvas = class {
          */
 
     static restore() {
-        return this._ctx().restore();
+        const ctx = this._ctx();
+        const entry = this._savedCanvasStates.pop();
+
+        if (!entry) {
+            return undefined;
+        }
+
+        if (entry.imageData && this._isCanvas2DContext(ctx) && typeof ctx.putImageData === 'function') {
+            ctx.putImageData(entry.imageData, 0, 0);
+        }
+
+        if (entry.drawState) {
+            this._fillEnabled = entry.drawState.fillEnabled;
+            this._strokeEnabled = entry.drawState.strokeEnabled;
+            this._fillStyleValue = entry.drawState.fillStyle;
+            this._strokeStyleValue = entry.drawState.strokeStyle;
+            this._fillColorGL = Array.isArray(entry.drawState.fillColorGL) ? [...entry.drawState.fillColorGL] : entry.drawState.fillColorGL;
+            this._strokeColorGL = Array.isArray(entry.drawState.strokeColorGL) ? [...entry.drawState.strokeColorGL] : entry.drawState.strokeColorGL;
+            this._ellipseModeValue = entry.drawState.ellipseMode;
+            this._rectModeValue = entry.drawState.rectMode;
+            this._smoothValue = entry.drawState.smooth;
+            this._strokeModeValue = entry.drawState.strokeMode;
+            this._curveDetailValue = entry.drawState.curveDetail;
+            this._textAlignHorizontal = entry.drawState.textAlignHorizontal;
+            this._textAlignVertical = entry.drawState.textAlignVertical;
+            this._textSizePixels = entry.drawState.textSizePixels;
+            this._textStyleValue = entry.drawState.textStyleValue;
+            this._textLeadingPixels = entry.drawState.textLeadingPixels;
+            this._textWrapValue = entry.drawState.textWrapValue;
+            this._textFontFamily = entry.drawState.textFontFamily;
+            this._textDirectionValue = entry.drawState.textDirectionValue;
+            this._textPropertyState = { ...entry.drawState.textPropertyState };
+        }
+
+        if (entry.contextWasSaved && typeof ctx.restore === 'function') {
+            ctx.restore();
+        }
+
+        this._syncDrawState(ctx);
+        this._syncTextStateIfPossible();
+        return entry;
     }
 
     // ---------------------------------------------------------------------

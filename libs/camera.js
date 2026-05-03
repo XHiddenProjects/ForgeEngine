@@ -614,5 +614,15 @@ export const Camera = class {
   }
 };
 
+// Eagerly initialize the view matrix from the default camera state.
+// This does NOT call #defaultAspect(), so it is safe to run before Canvex
+// has finished initializing (no circular-import ReferenceError).
 Camera.camera();
-Camera.perspective();
+// NOTE: Camera.perspective() is intentionally NOT called here.
+// It accesses Canvex.canvas to read the live aspect ratio, which would throw
+// a ReferenceError because canvex.js → shapes.js → camera.js creates a
+// circular import and Canvex is not yet defined at module-evaluation time.
+// The projection matrix is already seeded with valid defaults via the static
+// field initializers above. The first call to Shapes.#ensureDefaultCamera3D()
+// (inside a draw frame, when all modules are fully initialized) will call
+// Camera.perspective() with the correct canvas dimensions.
