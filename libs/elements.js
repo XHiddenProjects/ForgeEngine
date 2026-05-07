@@ -74,6 +74,7 @@ export const Elements = class {
      * @returns {HTMLElement} The appended element.
      */
     static addElement(el, parent = Elements.#parent()) {
+        
         if (!(el instanceof HTMLElement)) {
             throw new TypeError("addElement(el) expects an HTMLElement");
         }
@@ -137,8 +138,9 @@ export const Elements = class {
         if (typeof tagName !== "string" || !tagName.trim()) {
             throw new TypeError("createElement(tagName) expects a non-empty string");
         }
+        
         const el = document.createElement(tagName.trim());
-        el.innerHTML = this.#strip(html);
+        el.innerHTML = html??"";
         this.#initCanvasOverlay(el);
         return this.addElement(el);
     }
@@ -153,7 +155,7 @@ export const Elements = class {
     static createA(href, html, target = "_blank") {
         const el = document.createElement("a");
         el.href = href instanceof URL ? href.href : String(href ?? "");
-        el.innerHTML = this.#strip(html ?? "");
+        el.innerHTML = html??"";
         el.target = target || "_blank";
         this.#initCanvasOverlay(el);
         return /** @type {HTMLAnchorElement} */ (this.addElement(el));
@@ -199,7 +201,7 @@ export const Elements = class {
     static createButton(label = "Button", value = "") {
         const el = document.createElement("button");
         el.type = "button";
-        el.innerHTML = this.#strip(label);
+        el.innerHTML = label??"";
         el.value = String(value ?? "");
         this.#initCanvasOverlay(el);
         return /** @type {HTMLButtonElement} */ (this.addElement(el));

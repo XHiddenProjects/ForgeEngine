@@ -8,6 +8,7 @@ export const Triggers = class {
     static #_sequenceStates = new Map();
     static #_nthCounters = new Map();
     static #_mailbox = new Map(); // key: address, value: Message[]
+    static #_timerAccumulators = new Map(); // key: string, value: { elapsed, duration, fired }
 
   /**
    * Checks for collision between two circles and executes a callback if they collide.
@@ -286,6 +287,99 @@ export const Triggers = class {
   }
 
   // ---------------------------------------------------------------------------
+  // Timer — one-shot countdown trigger
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Fires a callback after a duration expressed in tenths of a second (ticks),
+   * where 1 tick = 100 ms. By default fires once and stops; pass `repeat: true`
+   * to loop indefinitely. Must be called every frame with the same key.
+   * Use `resetTimer` to rearm a one-shot timer or restart a repeating one.
+   *
+   * @param {string} key - A unique identifier for this timer instance.
+   * @param {number} durationTicks - Number of 1/10th-second ticks before firing.
+   * @param {number} delta - Time in milliseconds elapsed since the last frame.
+   * @param {Function} callback - The function to call when the timer expires.
+   * @param {Object} [options={}] - Optional configuration.
+   * @param {boolean} [options.repeat=false] - If true the timer loops after firing.
+   * @returns {number} Remaining ticks until next fire (0 when fired this frame).
+   * @example
+   * // One-shot: show banner after 3 seconds (30 ticks)
+   * Triggers.timer("levelIntro", 30, delta, () => showBanner("Ready!"));
+   *
+   * // Repeating: spawn an enemy every 2 seconds (20 ticks)
+   * Triggers.timer("spawn", 20, delta, () => spawnEnemy(), { repeat: true });
+   *
+   * // Rearm a one-shot timer (e.g. on player respawn)
+   * if (player.justRespawned) Triggers.resetTimer("levelIntro");
+   */
+  static timer(key, durationTicks, delta, callback, { repeat = false } = {}) {
+    const MS_PER_TICK = 100;
+    const durationMs = durationTicks * MS_PER_TICK;
+
+    let state = this.#_timerAccumulators.get(key);
+    if (!state) {
+      // repeatLimit: Infinity = loop forever, 0 = one-shot, N = N additional repeats
+      const repeatLimit = repeat === true ? Infinity : (repeat === false ? 0 : repeat);
+      state = { elapsed: 0, fired: false, fireCount: 0, repeatLimit };
+      this.#_timerAccumulators.set(key, state);
+    }
+
+    if (state.fired) return 0;
+
+    state.elapsed += delta;
+
+    if (state.elapsed >= durationMs) {
+      const index = state.fireCount;
+      state.fireCount += 1;
+      callback(index);
+
+      const shouldRepeat = state.repeatLimit === Infinity || state.fireCount < state.repeatLimit;
+      if (shouldRepeat) {
+        state.elapsed = state.elapsed % durationMs;
+      } else {
+        state.fired = true;
+        state.elapsed = durationMs;
+        return 0;
+      }
+    }
+
+    return Math.ceil((durationMs - state.elapsed) / MS_PER_TICK);
+  }
+
+  /**
+   * Rearms a timer so it counts down fresh from zero.
+   * Works for one-shot, finite-repeat, and infinite-repeat timers.
+   * @param {string} key - The timer key to reset.
+   * @example
+   * Triggers.resetTimer("levelIntro");
+   */
+  static resetTimer(key) {
+    this.#_timerAccumulators.delete(key);
+  }
+
+  /**
+   * Returns whether a timer has fully completed (one-shot fired, or finite
+   * repeat exhausted). Always returns false for infinite timers.
+   * @param {string} key - The timer key to check.
+   * @returns {boolean}
+   */
+  static timerFired(key) {
+    return this.#_timerAccumulators.get(key)?.fired ?? false;
+  }
+
+  /**
+   * Returns how many times a timer's callback has fired so far.
+   * @param {string} key - The timer key to check.
+   * @returns {number}
+   */
+  static timerCount(key) {
+    return this.#_timerAccumulators.get(key)?.fireCount ?? 0;
+  }
+
+ 
+
+  // ---------------------------------------------------------------------------
   // Mailbox — message queue triggers
   // ---------------------------------------------------------------------------
 
@@ -412,6 +506,7 @@ export const Triggers = class {
     this.#_sequenceStates.clear();
     this.#_nthCounters.clear();
     this.#_mailbox.clear();
+    this.#_timerAccumulators.clear();
   }
 
 }

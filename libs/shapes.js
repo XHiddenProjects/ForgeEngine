@@ -143,6 +143,8 @@ export class Shapes {
 
     /** @type {string} */
     static #textFontFamily = "sans-serif";
+    /** @type {{ vertices: Array<{x:number,y:number,z:number}>, uvs: Array<[number,number]> } | null} @private */
+    static #shapeVertexBuffer3D = null;
 
     /**
      * Resolves the currently active rendering context from `Canvex`.
@@ -2859,5 +2861,108 @@ static #buildTorusGeometry3D(radius = 50, tubeRadius = 10, detailX = 24, detailY
 
     geometry._edgeIndices = edgeIndices;
     return geometry;
+}
+/**
+ * Adds a vertex to the current shape/path with 2D and 3D support.
+ *
+ * ### Canvas 2D behavior
+ * - Appends to the **current path**.
+ * - The first call after a reset will `moveTo(x, y)`, subsequent calls `lineTo(x, y)`.
+ * - Any provided `z`, `u`, `v` values are ignored by Canvas 2D (but validated if present).
+ *
+ * ### WebGL/WebGL2 behavior
+ * - Records vertices into an internal buffer for later triangulation/drawing.
+ * - Supports p5-style overloads:
+ *   - `vertex(x, y)` → z = 0
+ *   - `vertex(x, y, z)`
+ *   - `vertex(x, y, u, v)` → treated as z = 0, u/v = texture coords
+ *   - `vertex(x, y, z, u, v)`
+ *
+ * @param {number} x - X coordinate in pixels.
+ * @param {number} y - Y coordinate in pixels.
+ * @param {number} [z=0] - Z coordinate (WebGL/WebGL2). Ignored in Canvas 2D.
+ * @param {number} [u] - Optional texture U coordinate (WebGL/WebGL2).
+ * @param {number} [v] - Optional texture V coordinate (WebGL/WebGL2).
+ * @returns {{x:number, y:number, z:number, u?:number, v?:number}}
+ * The normalized vertex that was appended/recorded.
+ * @throws {TypeError} If required numeric inputs are not finite.
+ */
+static vertex(x, y, z = 0, u, v) {
+    const ctx = this.#ctx();
+    this.#assertSupportedContext(ctx);
+
+    // ------------------------------------------------------------
+    // Argument normalization (p5-style)
+    // ------------------------------------------------------------
+    let zVal = 0;
+    let uVal = undefined;
+    let vVal = undefined;
+
+    // In WEBGL mode, allow vertex(x, y, u, v) => z=0, u/v = texcoords.
+    if (this.#isWebGL(ctx)) {
+        if (arguments.length === 4) {
+            // vertex(x, y, u, v) passed as (x, y, z, u) in our signature
+            zVal = 0;
+            uVal = z;  // shift: 3rd arg is u
+            vVal = u;  // shift: 4th arg is v
+        } else {
+            zVal = (Number.isFinite(z) ? z : 0);
+            uVal = u;
+            vVal = v;
+        }
+    } else {
+        // Canvas 2D: accept z if provided, but it is ignored for drawing.
+        zVal = (Number.isFinite(z) ? z : 0);
+        uVal = u;
+        vVal = v;
+    }
+
+    // Validate x/y/z always.
+    this.#assertFiniteNumbers("Vertex values", [x, y, zVal]);
+
+    // Validate u/v if present (WebGL use-case).
+    if (typeof uVal !== "undefined" && !Number.isFinite(uVal)) {
+        throw new TypeError("Vertex texture coordinate u must be a finite number");
+    }
+    if (typeof vVal !== "undefined" && !Number.isFinite(vVal)) {
+        throw new TypeError("Vertex texture coordinate v must be a finite number");
+    }
+
+    // ------------------------------------------------------------
+    // Canvas 2D: append to current path
+    // ------------------------------------------------------------
+    if (this.#isCanvas2D(ctx)) {
+        // Track whether we've started a subpath with moveTo.
+        // Users can manually reset this by calling ctx.beginPath()
+        // and then setting ctx.__canvexVertexSubpathStarted = false if needed.
+        const key = "__canvexVertexSubpathStarted";
+
+        if (!ctx[key]) {
+            ctx.moveTo(x, y);
+            ctx[key] = true;
+        } else {
+            ctx.lineTo(x, y);
+        }
+
+        return { x, y, z: 0 };
+    }
+
+    // ------------------------------------------------------------
+    // WebGL/WebGL2: record vertices for later drawing
+    // ------------------------------------------------------------
+    if (!this.#shapeVertexBuffer3D) {
+        this.#shapeVertexBuffer3D = { vertices: [], uvs: [] };
+    }
+
+    this.#shapeVertexBuffer3D.vertices.push({ x, y, z: zVal });
+
+    if (typeof uVal !== "undefined" && typeof vVal !== "undefined") {
+        this.#shapeVertexBuffer3D.uvs.push([uVal, vVal]);
+    }
+
+    const result = { x, y, z: zVal };
+    if (typeof uVal !== "undefined") result.u = uVal;
+    if (typeof vVal !== "undefined") result.v = vVal;
+    return result;
 }
 }

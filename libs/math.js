@@ -487,4 +487,157 @@ export const math = class{
     static atan2(y,x){
         return Math.atan2(y,x);
     }
+
+    /**
+     * Evaluates a mathematical expression with named inputs (A–F).
+     *
+     * @static
+     * @param {Object} inputs - Key-value pairs of named inputs (A–F) and their numeric values.
+     *   Must contain 1–6 entries. Keys not provided default to null and are excluded.
+     *   @example { "A": 10, "B": 5 }
+     * @param {string} expr - The mathematical expression to evaluate.
+     *   Supports the following:
+     *   - Arithmetic operators: `+`, `-`, `*`, `/`, `%`
+     *   - Grouping: `()`
+     *   - Math functions: `Math.abs`, `Math.acos`, `Math.asin`, `Math.atan`,
+     *     `Math.atan2`, `Math.ceil`, `Math.cos`, `Math.exp`, `Math.floor`,
+     *     `Math.max`, `Math.min`, `Math.pow`, `Math.round`, `Math.sin`,
+     *     `Math.sqrt`, `Math.tan`
+     *   - Input keys defined in the `inputs` parameter (e.g. `A`, `B`)
+     *   Any unsupported characters or identifiers are stripped before evaluation.
+     *   @example "Math.pow(A, 2) + B * (A - 1)"
+     * @returns {number} The numeric result of the evaluated expression.
+     * @throws {Error} If fewer than 1 or more than 6 inputs are provided.
+     * @throws {Error} If the expression is empty or only whitespace.
+     * @throws {Error} If the sanitized expression is invalid and cannot be evaluated.
+     *
+     * @example
+     * // Basic arithmetic
+     * math.expression({ A: 10, B: 5 }, "A + B");        // 15
+     * math.expression({ A: 10, B: 5 }, "A * B - 3");    // 47
+     *
+     * @example
+     * // Using Math functions
+     * math.expression({ A: 9 }, "Math.sqrt(A)");         // 3
+     * math.expression({ A: 2, B: 8 }, "Math.pow(A, B)"); // 256
+     *
+     * @example
+     * // Using multiple inputs with grouping
+     * math.expression({ A: 4, B: 3, C: 2 }, "Math.max(A, B) * (C + 1)"); // 12
+     */
+    static expression(inputs = {}, expr) {
+        inputs = { ...{ "A": null, "B": null, "C": null, "D": null, "E": null, "F": null }, ...inputs };
+
+        const definedInputs = Object.fromEntries(
+            Object.entries(inputs).filter(([_, v]) => v !== null)
+        );
+
+        if (Object.keys(definedInputs).length === 0 || Object.keys(definedInputs).length > 6) {
+            throw new Error("You must have 1-6 inputs");
+        }
+        if (!expr || expr.trim() === "") throw new Error("Expression cannot be empty");
+
+        const allowedMathFns = new Set([
+            'Math.abs', 'Math.acos', 'Math.asin', 'Math.atan', 'Math.atan2',
+            'Math.ceil', 'Math.cos', 'Math.exp', 'Math.floor', 'Math.max',
+            'Math.min', 'Math.pow', 'Math.round', 'Math.sin', 'Math.sqrt', 'Math.tan'
+        ]);
+
+        const keySet = new Set(Object.keys(definedInputs));
+
+        /**
+         * Removes any bare identifier call (and its argument list) that is not
+         * an allowed input key or the "Math" namespace — e.g. eval(...), alert(...).
+         * Traverses character-by-character so nested parens are handled correctly.
+         */
+        const removeDisallowedCalls = (s) => {
+            let result = '';
+            let i = 0;
+            while (i < s.length) {
+                const wordMatch = s.slice(i).match(/^([a-zA-Z_][a-zA-Z0-9_]*)/);
+                if (wordMatch) {
+                    const word = wordMatch[1];
+                    const afterWord = i + word.length;
+                    const precededByMathDot = result.endsWith('Math.');
+                    if (precededByMathDot || word === 'Math' || keySet.has(word)) {
+                        result += word;
+                        i = afterWord;
+                    } else {
+                        // Skip the identifier and its argument list if present
+                        i = afterWord;
+                        while (i < s.length && s[i] === ' ') i++;
+                        if (s[i] === '(') {
+                            let depth = 1; i++;
+                            while (i < s.length && depth > 0) {
+                                if (s[i] === '(') depth++;
+                                else if (s[i] === ')') depth--;
+                                i++;
+                            }
+                        }
+                    }
+                } else {
+                    result += s[i++];
+                }
+            }
+            return result;
+        };
+
+        /**
+         * Cleans up structural debris left by stripping — dangling operators,
+         * empty parentheses, misplaced commas, etc. Repeats passes until stable.
+         */
+        const cleanExpr = (s) => {
+            let prev;
+            s = s.replace(/\s+/g, ' ').trim();
+            // Remove empty paren groups
+            do { prev = s; s = s.replace(/\(\s*\)/g, ''); } while (s !== prev);
+            // Remove leading * / %
+            s = s.replace(/^[*/%\s]+/, '').trim();
+            // Remove trailing operators and commas
+            do { prev = s; s = s.replace(/[+\-*/%,]\s*$/, '').trim(); } while (s !== prev);
+            // Remove operator or comma before closing paren: (x +) → (x)
+            do { prev = s; s = s.replace(/[+\-*/%,]\s*\)/g, ')'); } while (s !== prev);
+            // Remove * / % immediately after opening paren: (*x) → (x)
+            do { prev = s; s = s.replace(/\(\s*[*/%]/g, '('); } while (s !== prev);
+            // Fix empty/dangling args: (,x) → (x), (x,) → (x), (,,) → (,)
+            do { prev = s; s = s.replace(/\(\s*,+/g, '('); } while (s !== prev);
+            do { prev = s; s = s.replace(/,+\s*\)/g, ')'); } while (s !== prev);
+            do { prev = s; s = s.replace(/,\s*,/g, ','); } while (s !== prev);
+            // Remove any empty paren groups created by the above
+            do { prev = s; s = s.replace(/\(\s*\)/g, ''); } while (s !== prev);
+            return s.replace(/\s{2,}/g, ' ').trim();
+        };
+
+        let sanitized = expr;
+
+        // Step 1: strip disallowed characters
+        sanitized = sanitized.replace(/[^a-zA-Z0-9.+\-*/%(),\s]/g, '');
+
+        // Step 2: remove disallowed Math.* calls entirely (name + argument list)
+        sanitized = sanitized.replace(/Math\.[a-zA-Z0-9]+/g, m => allowedMathFns.has(m) ? m : 'Math.\x00');
+        sanitized = sanitized.replace(/Math\.\x00\s*\([^)]*\)/g, '');
+        sanitized = sanitized.replace(/Math\.\x00/g, '');
+
+        // Step 3: remove disallowed bare function calls including their argument lists
+        sanitized = removeDisallowedCalls(sanitized);
+
+        // Step 4: clean up structural debris from stripping
+        sanitized = cleanExpr(sanitized);
+
+        // Step 5: substitute input keys with their numeric values
+        Object.entries(definedInputs).forEach(([key, value]) => {
+            sanitized = sanitized.replace(new RegExp(`\\b${key}\\b`, 'g'), `(${value})`);
+        });
+
+        // Step 6: final structural cleanup after substitution
+        sanitized = cleanExpr(sanitized);
+
+        if (!sanitized) throw new Error("Expression is empty after sanitization");
+
+        try {
+            return Function(`"use strict"; return (${sanitized})`)();
+        } catch (e) {
+            throw new Error(`Invalid expression: ${e.message}`);
+        }
+    }
 }

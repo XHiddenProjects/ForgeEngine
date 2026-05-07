@@ -10,21 +10,29 @@ import { Helpers } from "./libs/helpers.js";
 import { Triggers } from './libs/triggers.js';
 import { Logic } from "./libs/logic.js";
 import { DateTime } from './libs/datetime.js';
+import { Multiplayer } from "./libs/mutliplayer.js";
+import { Text } from "./libs/text.js";
+import { GUI } from "./libs/gui.js";
+import { Elements } from "./libs/elements.js";
+import { Devices } from "./libs/devices.js";
+import { List } from "./libs/list.js";
+import { Physics } from "./libs/physics.js";
+import { Transform } from './libs/transforms.js'
+import { Color } from "./libs/color.js";
+import { Sound } from "./libs/sound.js";
 
-const canvasWidth = 500;
+const canvasWidth  = 500;
 const canvasHeight = 500;
+// ─── Setup ────────────────────────────────────────────────────────────────────
+window.setup = async function () {
+  Canvex.createCanvas(0,0,canvasWidth,canvasHeight);
+  Canvex.background(Color.color(200));
 
-window.setup = function () {
-  Canvex.createCanvas(0, 0, canvasWidth, canvasHeight, Canvex.WEBGL);
   
-  Canvex.background(200);
-
 };
 
 
-
-
+// ─── Draw ─────────────────────────────────────────────────────────────────────
 window.draw = function () {
-
+  
 };
-

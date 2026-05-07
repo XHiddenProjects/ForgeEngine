@@ -1,3 +1,4 @@
+import { math } from "./math.js";
 export const Helpers = class {
     /**
      * Creates a URL builder
@@ -78,7 +79,7 @@ export const Helpers = class {
         const chars = '012345678abcdef',
         len = more_entropy ? 23 : 13;
         let id='';
-        for(let i=0;i<len;i++) id+=chars[Math.floor(Math.random()*chars.length)];
+        for(let i=0;i<len;i++) id+=math.random(chars.split());
         return `${prefix}${id}`;
     }
     /**
@@ -267,13 +268,6 @@ export const Helpers = class {
      * Helpers.clamp(50, 0, 100); // 50
      */
     static clamp(value, min, max) {
-        if (
-            !Number.isFinite(value) ||
-            !Number.isFinite(min) ||
-            !Number.isFinite(max)
-        ) {
-            throw new TypeError("Clamp arguments must be finite numbers");
-        }
 
         if (min > max) {
             // Optional safety swap
@@ -282,4 +276,85 @@ export const Helpers = class {
 
         return Math.max(min, Math.min(max, value));
     }
+    
+  
+ /**
+   * Generates an ID using either:
+   * 1. A custom pattern, or
+   * 2. A fixed random length
+   *
+   * Pattern tokens:
+   * - A = random uppercase letter
+   * - a = random lowercase letter
+   * - 9 = random number
+   * - X = random uppercase letter or number
+   * - x = random lowercase letter or number
+   * - \* = random uppercase/lowercase letter or number
+   *
+   * @param {string|object} options Pattern string or options object
+   * @param {number} options.length Random ID length when pattern is not used
+   * @param {string} options.pattern Custom ID pattern
+   * @param {string} options.prefix Text placed before generated ID
+   * @param {string} options.charset Characters used for length-based generation
+   * @returns {string}
+   */
+  static generateId(options = {}) {
+    if (typeof options === "string") {
+      options = {
+        pattern: options,
+      };
+    }
+
+    const uppercase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const lowercase = "abcdefghijklmnopqrstuvwxyz";
+    const numbers = "0123456789";
+    const alphanumeric = `${uppercase}${lowercase}${numbers}`;
+
+    const {
+      pattern = "",
+      length = 8,
+      prefix = "",
+      charset = alphanumeric,
+    } = options;
+
+    const pick = (chars) => {
+      return math.random(chars.split());
+    };
+
+    // Pattern-based ID
+    if (pattern) {
+      const id = pattern.replace(/[Aa9Xx*]/g, (token) => {
+        switch (token) {
+          case "A":
+            return pick(uppercase);
+
+          case "a":
+            return pick(lowercase);
+
+          case "9":
+            return pick(numbers);
+
+          case "X":
+            return pick(uppercase + numbers);
+
+          case "x":
+            return pick(lowercase + numbers);
+
+          case "*":
+            return pick(alphanumeric);
+
+          default:
+            return token;
+        }
+      });
+
+      return prefix + id;
+    }
+    // Length-based ID
+    let id = "";
+    for (let i = 0; i < length; i++) id += pick(charset);
+    return `${prefix}${id}`;
+  }
+
+
 }
