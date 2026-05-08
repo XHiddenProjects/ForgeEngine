@@ -20,6 +20,7 @@ import { Physics } from "./libs/physics.js";
 import { Transform } from './libs/transforms.js'
 import { Color } from "./libs/color.js";
 import { Sound } from "./libs/sound.js";
+import { Flow } from "./libs/flow.js";
 
 const canvasWidth  = 500;
 const canvasHeight = 500;
@@ -30,6 +31,7 @@ window.setup = async function () {
 
   
 };
+
 
 
 // ─── Draw ─────────────────────────────────────────────────────────────────────
