@@ -848,4 +848,181 @@ export const Interaction = class {
         // φ always wraps freely — no clamping, no bouncing at the poles.
         this.#orbitPhi   = this.#wrapAngle(this.#orbitPhi   + dPhi);
     }
+
+// -------------------------------------------------------------------------
+// Pan / Move / Zoom (2D/3D support)
+// -------------------------------------------------------------------------
+
+static #v3(x = 0, y = 0, z = 0) { return { x, y, z }; }
+static #vAdd(a, b) { return { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }; }
+static #vSub(a, b) { return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }; }
+static #vMul(a, s) { return { x: a.x * s, y: a.y * s, z: a.z * s }; }
+static #vCross(a, b) {
+    return {
+        x: a.y * b.z - a.z * b.y,
+        y: a.z * b.x - a.x * b.z,
+        z: a.x * b.y - a.y * b.x,
+    };
+}
+static #vLen(a) { return Math.hypot(a.x, a.y, a.z); }
+static #vNorm(a) {
+    const l = Math.hypot(a.x, a.y, a.z) || 1;
+    return { x: a.x / l, y: a.y / l, z: a.z / l };
+}
+
+static #getCameraState() {
+    // Prefer snapshot() if available; it is used elsewhere in this module.
+    const snap = Camera.snapshot();
+    const eye = this.#v3(
+        snap?.eyeX ?? snap?.eye?.x ?? snap?.eye?.[0] ?? 0,
+        snap?.eyeY ?? snap?.eye?.y ?? snap?.eye?.[1] ?? 0,
+        snap?.eyeZ ?? snap?.eye?.z ?? snap?.eye?.[2] ?? 200,
+    );
+    const center = this.#v3(
+        snap?.centerX ?? snap?.center?.x ?? snap?.center?.[0] ?? 0,
+        snap?.centerY ?? snap?.center?.y ?? snap?.center?.[1] ?? 0,
+        snap?.centerZ ?? snap?.center?.z ?? snap?.center?.[2] ?? 0,
+    );
+    let up = this.#v3(
+        snap?.upX ?? snap?.up?.x ?? snap?.up?.[0] ?? 0,
+        snap?.upY ?? snap?.up?.y ?? snap?.up?.[1] ?? 1,
+        snap?.upZ ?? snap?.up?.z ?? snap?.up?.[2] ?? 0,
+    );
+
+    const forward = this.#vNorm(this.#vSub(center, eye));
+    const right = this.#vNorm(this.#vCross(forward, up));
+    up = this.#vNorm(this.#vCross(right, forward));
+    const dist = this.#vLen(this.#vSub(eye, center));
+
+    // Approx world units per pixel (fallback). This scales pan in a way that
+    // feels consistent at different camera distances.
+    const canvas = Canvex.canvas;
+    const h = canvas?.height || 400;
+    const worldPerPx = dist / h;
+
+    return { snap, eye, center, up, right, forward, dist, worldPerPx };
+}
+
+static #applyCamera(eye, center, up) {
+    Camera.camera(
+        eye.x, eye.y, eye.z,
+        center.x, center.y, center.z,
+        up.x, up.y, up.z,
+    );
+    const gl = this.#gl();
+    if (gl) this.#uploadCameraMatrices(gl);
+}
+
+/**
+ * Pan the active view.
+ *
+ * - Canvas 2D: pans the 2D view transform (screen/pixel space).
+ * - WebGL/WebGL2: pans the camera parallel to the view plane.
+ *
+ * @param {number} dx Horizontal pan amount (pixels for 2D; pixels mapped to world units for 3D).
+ * @param {number} dy Vertical pan amount (pixels for 2D; pixels mapped to world units for 3D).
+ * @param {object} [options={}]
+ * @param {number} [options.sensitivity=1] Scale factor for pan.
+ */
+static pan(dx = 0, dy = 0, options = {}) {
+    dx = Number.isFinite(dx) ? dx : 0;
+    dy = Number.isFinite(dy) ? dy : 0;
+    const sensitivity = Number.isFinite(options?.sensitivity) ? options.sensitivity : 1;
+
+    // 2D
+    if (Canvex.isCanvas2D()) {
+        Canvex.pan(dx * sensitivity, dy * sensitivity);
+        return;
+    }
+
+    // 3D
+    const gl = this.#gl();
+    if (!gl) return;
+
+    const { eye, center, up, right, worldPerPx } = this.#getCameraState();
+    const delta = this.#vAdd(
+        this.#vMul(right, -dx * worldPerPx * sensitivity),
+        this.#vMul(up,     dy * worldPerPx * sensitivity),
+    );
+    this.#applyCamera(this.#vAdd(eye, delta), this.#vAdd(center, delta), up);
+}
+
+/**
+ * Move the active view.
+ *
+ * - Canvas 2D: moves the view offset (absolute) or pans (delta).
+ * - WebGL/WebGL2: translates the camera eye+center (delta) or recenters the camera target (absolute).
+ *
+ * @param {number} x For 2D: x offset/pan (pixels). For 3D: world x.
+ * @param {number} y For 2D: y offset/pan (pixels). For 3D: world y.
+ * @param {number} z For 3D absolute/delta z (ignored in 2D).
+ * @param {object} [options={}]
+ * @param {boolean} [options.absolute=false] When true: set absolute position (2D offset or 3D center).
+ */
+static move(x = 0, y = 0, z = 0, options = {}) {
+    x = Number.isFinite(x) ? x : 0;
+    y = Number.isFinite(y) ? y : 0;
+    z = Number.isFinite(z) ? z : 0;
+    const absolute = !!options?.absolute;
+
+    // 2D
+    if (Canvex.isCanvas2D()) {
+        if (absolute) Canvex.move(x, y);
+        else Canvex.pan(x, y);
+        return;
+    }
+
+    // 3D
+    const gl = this.#gl();
+    if (!gl) return;
+
+    const { eye, center, up } = this.#getCameraState();
+    if (absolute) {
+        const newCenter = this.#v3(x, y, z);
+        const offset = this.#vSub(eye, center);
+        const newEye = this.#vAdd(newCenter, offset);
+        this.#applyCamera(newEye, newCenter, up);
+    } else {
+        const delta = this.#v3(x, y, z);
+        this.#applyCamera(this.#vAdd(eye, delta), this.#vAdd(center, delta), up);
+    }
+}
+
+/**
+ * Zoom the active view.
+ *
+ * - Canvas 2D: zooms the 2D view transform (multiplicative factor).
+ * - WebGL/WebGL2: dollies the camera toward/away from the center (multiplicative factor).
+ *
+ * @param {number} factor Multiplicative zoom factor (>1 zoom in, <1 zoom out).
+ * @param {number} [centerX] 2D zoom focal x (pixels). Defaults to canvas center.
+ * @param {number} [centerY] 2D zoom focal y (pixels). Defaults to canvas center.
+ * @param {object} [options={}]
+ * @param {number} [options.minDistance=1] Minimum camera distance in 3D.
+ */
+static zoom(factor = 1, centerX = undefined, centerY = undefined, options = {}) {
+    factor = Number(factor);
+    if (!Number.isFinite(factor) || factor === 0) return;
+
+    // 2D
+    if (Canvex.isCanvas2D()) {
+        Canvex.zoom(
+            factor,
+            Number.isFinite(centerX) ? centerX : Canvex.width * 0.5,
+            Number.isFinite(centerY) ? centerY : Canvex.height * 0.5,
+        );
+        return;
+    }
+
+    // 3D
+    const gl = this.#gl();
+    if (!gl) return;
+
+    const minDistance = Number.isFinite(options?.minDistance) ? options.minDistance : 1;
+    const { eye, center, up, forward, dist } = this.#getCameraState();
+    const newDist = Math.max(minDistance, dist / factor);
+    const newEye = this.#vSub(center, this.#vMul(forward, newDist));
+    this.#applyCamera(newEye, center, up);
+}
+
 };

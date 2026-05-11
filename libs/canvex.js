@@ -39,6 +39,84 @@ export class Canvex {
     static #currentContextMode = '2d';
     static #resetTransformPerFrame = true;
 
+// ---------------------------------------------------------------------
+// 2D View Transform (Pan / Move / Zoom)
+// ---------------------------------------------------------------------
+static #viewEnabled = false;
+static #viewX = 0;
+static #viewY = 0;
+static #viewScale = 1;
+
+static #viewScaleMin = 0.05;
+static #viewScaleMax = 50;
+
+static get view() {
+    return { x: Canvex.#viewX, y: Canvex.#viewY, scale: Canvex.#viewScale };
+}
+
+static enableViewTransform(enabled = true) {
+    Canvex.#viewEnabled = !!enabled;
+}
+
+static resetView() {
+    Canvex.#viewEnabled = false;
+    Canvex.#viewX = 0;
+    Canvex.#viewY = 0;
+    Canvex.#viewScale = 1;
+}
+
+/**
+ * Pan the 2D canvas view by dx,dy (screen/pixel space).
+ */
+static pan(dx = 0, dy = 0) {
+    dx = Number.isFinite(dx) ? dx : 0;
+    dy = Number.isFinite(dy) ? dy : 0;
+
+    Canvex.#viewEnabled = true;
+    Canvex.#viewX += dx;
+    Canvex.#viewY += dy;
+}
+
+/**
+ * Move the 2D canvas view to an absolute x,y offset (screen/pixel space).
+ */
+static move(x = 0, y = 0) {
+    x = Number.isFinite(x) ? x : 0;
+    y = Number.isFinite(y) ? y : 0;
+
+    Canvex.#viewEnabled = true;
+    Canvex.#viewX = x;
+    Canvex.#viewY = y;
+}
+
+/**
+ * Zoom the 2D view by a multiplicative factor, optionally around a focal point.
+ * factor > 1 zooms in, factor < 1 zooms out.
+ */
+static zoom(factor = 1, centerX = Canvex.width * 0.5, centerY = Canvex.height * 0.5) {
+    factor = Number(factor);
+    if (!Number.isFinite(factor) || factor === 0) return Canvex.#viewScale;
+
+    const oldScale = Canvex.#viewScale;
+    let newScale = oldScale * factor;
+
+    newScale = Math.max(Canvex.#viewScaleMin, Math.min(Canvex.#viewScaleMax, newScale));
+    const applied = newScale / oldScale;
+
+    const cx = Number.isFinite(centerX) ? centerX : Canvex.width * 0.5;
+    const cy = Number.isFinite(centerY) ? centerY : Canvex.height * 0.5;
+
+    // Keep (cx,cy) stable on screen while scaling
+    Canvex.#viewX = cx - (cx - Canvex.#viewX) * applied;
+    Canvex.#viewY = cy - (cy - Canvex.#viewY) * applied;
+
+    Canvex.#viewScale = newScale;
+    Canvex.#viewEnabled = true;
+
+    return Canvex.#viewScale;
+}
+
+
     /** @type {WeakMap<WebGLRenderingContext | WebGL2RenderingContext, {program: WebGLProgram, vertexShader: WebGLShader, fragmentShader: WebGLShader}>} */
     static #defaultWebGLPrograms = new WeakMap();
 
@@ -322,11 +400,23 @@ void main() {
     }
 
     /** @private */
-    static #prepareFrame() {
-        const ctx = Canvex.#ctx;
-        if (!Canvex.#resetTransformPerFrame || !Canvex.#isCanvas2D(ctx)) return;
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
+    
+static #prepareFrame() {
+    const ctx = Canvex.#ctx;
+    if (!Canvex.#resetTransformPerFrame || !Canvex.#isCanvas2D(ctx)) return;
+
+    // Reset per-frame transforms
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+    // Apply persistent view transform (Pan/Move/Zoom)
+    if (Canvex.#viewEnabled) {
+        ctx.setTransform(
+            Canvex.#viewScale, 0,
+            0, Canvex.#viewScale,
+            Canvex.#viewX, Canvex.#viewY,
+        );
     }
+}
 
     /**
      * Gets the measured frame rate or sets the target frame-rate cap.

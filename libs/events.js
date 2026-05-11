@@ -225,6 +225,7 @@ export const pointer = class {
   static mousePressed = (event) => {};
   static mouseReleased = (event) => {};
   static mouseWheel = (event) => {};
+  static mouseLeave = (event)=>{};
   static pen = (event) => {};
 
   /** @type {EventTarget|null} */
@@ -232,6 +233,9 @@ export const pointer = class {
 
   /** @type {object|null} */
   static #listeners = null;
+
+  
+
 
   /**
    * Requests pointer lock on an element.
@@ -390,50 +394,102 @@ export const pointer = class {
     this.mouseIsPressed = this.touches.length > 0;
   }
 
+  static #handleLeave(e) {
+    // Update last known positions if you want (optional)
+    this.#updateMousePosition(e);
+
+    // Common behavior when leaving the element:
+    // - clear pressed buttons
+    // - clear touches
+    // - mouseIsPressed false
+    this.#resetPressState?.();        // if you have it implemented
+    this.mouseIsPressed = false;
+    this.penIsPressed = false;
+    this.usingPen = false;
+    this.penPressure = 0;
+    this.touches = [];
+
+    // Notify user code
+    this.mouseLeave(e);
+  }
+
   /**
    * Attach pointer listeners to any element/EventTarget.
    * @param {EventTarget} target
    * @returns {boolean}
    */
   static attach(target = globalThis.window) {
-    if (!target || typeof target.addEventListener !== "function") return false;
+  if (!target || typeof target.addEventListener !== "function") return false;
 
-    this.detach();
-    this.#target = target;
+  // If already attached elsewhere, detach first
+  if (this.#target && this.#target !== target) this.detach();
 
-    this.#listeners = {
-      pointerdown: (e) => this.#handlePointerDown(e),
-      pointermove: (e) => this.#handlePointerMove(e),
-      pointerup: (e) => this.#handlePointerUp(e),
-      pointercancel: (e) => this.#handlePointerUp(e),
-      click: (e) => this.#handleClick(e),
-      dblclick: (e) => this.#handleDblClick(e),
-      wheel: (e) => this.#handleWheel(e),
-      touchstart: (e) => this.#handleTouchStart(e),
-      touchmove: (e) => this.#handleTouchMove(e),
-      touchend: (e) => this.#handleTouchEnd(e),
-      touchcancel: (e) => this.#handleTouchEnd(e),
-      blur: () => this.#resetPressState(),
-    };
+  this.#target = target;
 
-    for (const [eventName, handler] of Object.entries(this.#listeners)) {
-      target.addEventListener(eventName, handler);
-    }
+  // Build listener fns once so detach() can remove them
+  this.#listeners = {
+    down: (e) => this.#handlePointerDown(e),
+    move: (e) => this.#handlePointerMove(e),
+    up: (e) => this.#handlePointerUp(e),
+    click: (e) => this.#handleClick(e),
+    dblclick: (e) => this.#handleDblClick(e),
+    wheel: (e) => this.#handleWheel(e),
+    touchstart: (e) => this.#handleTouchStart(e),
+    touchmove: (e) => this.#handleTouchMove(e),
+    touchend: (e) => this.#handleTouchEnd(e),
+    leave: (e) => this.#handleLeave(e),
+  };
 
-    return true;
-  }
+  // Pointer events (recommended)
+  target.addEventListener("pointerdown", this.#listeners.down);
+  target.addEventListener("pointermove", this.#listeners.move);
+  target.addEventListener("pointerup", this.#listeners.up);
+  target.addEventListener("pointercancel", this.#listeners.up);
+  target.addEventListener("pointerleave", this.#listeners.leave); // ✅
+
+  // Optional: classic mouseleave fallback (esp. if target isn't pointer-event friendly)
+  target.addEventListener("mouseleave", this.#listeners.leave); // ✅
+
+  // Optional extras
+  target.addEventListener("click", this.#listeners.click);
+  target.addEventListener("dblclick", this.#listeners.dblclick);
+  target.addEventListener("wheel", this.#listeners.wheel, { passive: true });
+
+  // Touch (only if you still want explicit touch events)
+  target.addEventListener("touchstart", this.#listeners.touchstart, { passive: false });
+  target.addEventListener("touchmove", this.#listeners.touchmove, { passive: false });
+  target.addEventListener("touchend", this.#listeners.touchend);
+  target.addEventListener("touchcancel", this.#listeners.touchend);
+
+  return true;
+}
 
   /** Detach pointer listeners from the current target. */
   static detach() {
     if (!this.#target || !this.#listeners) return false;
 
-    for (const [eventName, handler] of Object.entries(this.#listeners)) {
-      this.#target.removeEventListener(eventName, handler);
-    }
+    const t = this.#target;
+    const L = this.#listeners;
+
+    t.removeEventListener("pointerdown", L.down);
+    t.removeEventListener("pointermove", L.move);
+    t.removeEventListener("pointerup", L.up);
+    t.removeEventListener("pointercancel", L.up);
+    t.removeEventListener("pointerleave", L.leave);
+
+    t.removeEventListener("mouseleave", L.leave);
+
+    t.removeEventListener("click", L.click);
+    t.removeEventListener("dblclick", L.dblclick);
+    t.removeEventListener("wheel", L.wheel);
+
+    t.removeEventListener("touchstart", L.touchstart);
+    t.removeEventListener("touchmove", L.touchmove);
+    t.removeEventListener("touchend", L.touchend);
+    t.removeEventListener("touchcancel", L.touchend);
 
     this.#target = null;
     this.#listeners = null;
-    this.#resetPressState();
     return true;
   }
 
@@ -463,6 +519,7 @@ export const Window = class {
   static blurredEvent = (event) => {};
   static visibilityChanged = (event) => {};
   static fullscreenChanged = (event) => {};
+  static contextMenu = (event) => {};
 
   static get prevWidth() {
     return this.#pwidth;
@@ -515,16 +572,21 @@ export const Window = class {
     this.fullscreen = !!document.fullscreenElement;
     this.fullscreenChanged(e);
   }
+  static #handleContextMenu(e) {
+  // If you want to disable the default browser menu globally, do it here:
+  }
 
   static {
     if (typeof window !== "undefined" && typeof document !== "undefined") {
       window.addEventListener("resize", (e) => this.#handleResize(e));
       window.addEventListener("focus", (e) => this.#handleFocus(e));
+      window.addEventListener("blur", (e)=>this.#handleVisibility(e));    
       window.addEventListener("blur", (e) => this.#handleBlur(e));
-      document.addEventListener("visibilitychange", (e) => this.#handleVisibility(e));
       document.addEventListener("fullscreenchange", (e) => this.#handleFullscreen(e));
+      document.addEventListener("contextmenu", (e) => this.#handleContextMenu(e));
     }
   }
+
 };
 
 /**

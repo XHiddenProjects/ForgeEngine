@@ -607,16 +607,43 @@ export const Sprites = class {
      * @private
      */
     static _ensureImageCanvas(img) {
+        if (!img) {
+            throw new TypeError("Sprites._ensureImageCanvas: img is null/undefined");
+        }
         if (img._canvas && img._ctx) return img;
 
-        img._canvas = document.createElement('canvas');
-        img._canvas.width = img.width;
-        img._canvas.height = img.height;
-        img._ctx = img._canvas.getContext('2d');
+        const w = img.width ?? img.naturalWidth ?? 0;
+        const h = img.height ?? img.naturalHeight ?? 0;
+        if (!w || !h) {
+            throw new Error("Sprites._ensureImageCanvas: image has no size (not loaded yet?)");
+        }
 
-        const imageData = img._ctx.createImageData(img.width, img.height);
-        imageData.data.set(img.pixels);
-        img._ctx.putImageData(imageData, 0, 0);
+        img._canvas = document.createElement("canvas");
+        img._canvas.width = w;
+        img._canvas.height = h;
+
+        img._ctx = img._canvas.getContext("2d", { willReadFrequently: true });
+
+        // If it's a Canvex Image (has pixels), use the fast path
+        if (img.pixels && img.pixels.length === w * h * 4) {
+            const imageData = img._ctx.createImageData(w, h);
+            imageData.data.set(img.pixels);
+            img._ctx.putImageData(imageData, 0, 0);
+            return img;
+        }
+
+        // Fallback: HTMLImageElement / HTMLCanvasElement / ImageBitmap → draw & read pixels
+        try {
+            img._ctx.clearRect(0, 0, w, h);
+            img._ctx.drawImage(img, 0, 0, w, h);
+            img.pixels = img._ctx.getImageData(0, 0, w, h).data;
+        } catch (e) {
+            // This can happen if the image is not loaded OR is cross-origin tainted
+            throw new Error(
+            "Sprites._ensureImageCanvas: couldn't read pixels from image. " +
+            "Make sure it's loaded and not cross-origin without CORS. Original: " + e.message
+            );
+        }
 
         return img;
     }
@@ -1119,6 +1146,81 @@ export const Sprites = class {
         sprite.scaleY = doneY ? targetScale : sprite.scaleY + Math.sign(diffY) * step;
 
         return doneX && doneY;
+    }
+
+    // ─── PixelArt integration ────────────────────────────────────────────────
+
+    /**
+     * Creates a sprite from a `PixelArt` editor instance using its current frame.
+     *
+     * Internally calls `pixelArt.toImage(scale)` to get an `HTMLImageElement`,
+     * then forwards it to {@link Sprites.create} along with any extra options.
+     *
+     * @param {PixelArt} pixelArt  A `PixelArt` instance.
+     * @param {object}   [options={}]  Any {@link Sprites.create} options.
+     * @param {number}   [options.scale=1]  Integer pixel-upscale factor (e.g. 4 → 4× larger).
+     * @returns {Promise<object>} Resolves to the created sprite.
+     *
+     * @example
+     * const hero = await Sprites.createFromPixelArt(editor, { x: 100, y: 200, scale: 4 });
+     * Sprites.draw(hero);
+     */
+    static async createFromPixelArt(pixelArt, options = {}) {
+        if (typeof pixelArt?.toImage !== "function") {
+            throw new TypeError("createFromPixelArt: first argument must be a PixelArt instance with a toImage() method");
+        }
+        const scale = options.scale ?? 1;
+        const img   = await pixelArt.toImage(scale);
+        const { scale: _s, ...rest } = options; // strip scale from sprite options
+        return this.create({ image: img, width: img.width, height: img.height, ...rest });
+    }
+
+    /**
+     * Creates a sprite backed by an animated sprite-sheet built from ALL frames
+     * of a `PixelArt` editor instance.
+     *
+     * The method calls `pixelArt.toSpriteSheet(scale)`, builds a sheet descriptor
+     * via {@link Sprites.createSheet}, defines a default `'default'` animation
+     * covering all frames, and plays it immediately.
+     *
+     * @param {PixelArt} pixelArt  A `PixelArt` instance.
+     * @param {object}   [options={}]
+     * @param {number}   [options.scale=1]    Integer pixel-upscale factor.
+     * @param {number}   [options.fps]        Animation FPS (falls back to the editor's FPS setting when omitted).
+     * @param {boolean}  [options.loop=true]  Whether the animation loops.
+     * @param {string}   [options.animName='default']  Name of the auto-created animation.
+     * @param   ...rest  Any remaining {@link Sprites.create} options (x, y, alpha, etc.).
+     * @returns {Promise<object>} Resolves to the created sprite.
+     *
+     * @example
+     * // Pixel-art editor with 4 walk frames → animated sprite at 8 fps
+     * const hero = await Sprites.createAnimatedFromPixelArt(editor, {
+     *   x: 200, y: 300, scale: 4, fps: 8,
+     * });
+     */
+    static async createAnimatedFromPixelArt(pixelArt, options = {}) {
+        if (typeof pixelArt?.toSpriteSheet !== "function") {
+            throw new TypeError("createAnimatedFromPixelArt: first argument must be a PixelArt instance with a toSpriteSheet() method");
+        }
+        const { scale = 1, fps, loop = true, animName = "default", ...spriteOptions } = options;
+
+        const { image, frameWidth, frameHeight, frameCount } = await pixelArt.toSpriteSheet(scale);
+        const sheet = this.createSheet(image, frameWidth, frameHeight);
+
+        const sprite = this.create({
+            image,
+            sheet,
+            width:  frameWidth,
+            height: frameHeight,
+            ...spriteOptions,
+        });
+
+        const animFps = fps ?? (typeof pixelArt._fps === "number" ? pixelArt._fps : 8);
+        const frames  = Array.from({ length: frameCount }, (_, i) => i);
+        this.addAnimation(sprite, animName, { frames, fps: animFps, loop });
+        this.playAnimation(sprite, animName);
+
+        return sprite;
     }
 
     // ─── Clone ───────────────────────────────────────────────────────────────

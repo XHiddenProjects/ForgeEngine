@@ -23,6 +23,7 @@ import { Sound } from "./libs/sound.js";
 import { Flow } from "./libs/flow.js";
 import { Sprites } from "./libs/sprites.js";
 import { Image } from "./libs/image.js";
+import { PixelArt } from "./editors/pixelart.js";
 
 const canvasWidth  = 500;
 const canvasHeight = 500;
@@ -30,8 +31,13 @@ const canvasHeight = 500;
 // ─── Setup ────────────────────────────────────────────────────────────────────
 window.setup = async function () {
   Canvex.createCanvas(0, 0, canvasWidth, canvasHeight);
-  Canvex.background(Color.color(30));
-
+  Canvex.background(Color.color(200));
+  const x = new PixelArt('.pixel-container',{
+    cols:32,
+    rows: 32,
+    showGrid: true
+  });
+  
 };
 
 // ─── Draw ─────────────────────────────────────────────────────────────────────

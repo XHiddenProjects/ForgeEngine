@@ -227,7 +227,7 @@ export class Shapes {
      *
      * @example
      * // Internal helper usage
-     * this.#assertFiniteNumbers("Circle values", [x, y, d, segments]);
+     * //this.#assertFiniteNumbers("Circle values", [x, y, d, segments]);
      */
     static #assertFiniteNumbers(label, values) {
         for (const value of values) {
@@ -508,7 +508,7 @@ export class Shapes {
     static line(x1, y1, x2, y2, z1 = 0, z2 = 0) {
         const ctx = this.#ctx();
         this.#assertSupportedContext(ctx);
-        this.#assertFiniteNumbers("Line coordinates", [x1, y1, x2, y2, z1, z2]);
+        ////this.#assertFiniteNumbers("Line coordinates", [x1, y1, x2, y2, z1, z2]);
 
         if (this.#isCanvas2D(ctx)) {
             ctx.beginPath();
@@ -599,7 +599,7 @@ export class Shapes {
     static rect(x, y, w, h, tl = 0, tr = tl, br = tr, bl = tl, detailX = 1, detailY = 1) {
         const ctx = this.#ctx();
         this.#assertSupportedContext(ctx);
-        this.#assertFiniteNumbers("Rectangle values", [x, y, w, h, tl, tr, br, bl, detailX, detailY]);
+        //this.#assertFiniteNumbers("Rectangle values", [x, y, w, h, tl, tr, br, bl, detailX, detailY]);
 
         const rect = this.#resolveRectGeometry(x, y, w, h);
         const drawX = rect.x;
@@ -730,7 +730,7 @@ export class Shapes {
     static circle(x, y, d, segments = 32) {
         const ctx = this.#ctx();
         this.#assertSupportedContext(ctx);
-        this.#assertFiniteNumbers("Circle values", [x, y, d, segments]);
+        //this.#assertFiniteNumbers("Circle values", [x, y, d, segments]);
 
         const ellipse = this.#resolveEllipseGeometry(x, y, d, d);
         const centerX = ellipse.x;
@@ -828,7 +828,7 @@ export class Shapes {
             mode = undefined;
         }
 
-        this.#assertFiniteNumbers("Arc values", [x, y, w, h, start, stop, detail]);
+        //this.#assertFiniteNumbers("Arc values", [x, y, w, h, start, stop, detail]);
 
         const ellipse = this.#resolveEllipseGeometry(x, y, w, h);
         const centerX = ellipse.x;
@@ -1007,7 +1007,7 @@ export class Shapes {
         this.#assertSupportedContext(ctx);
 
         const size = Math.max(1, Number(ctx.lineWidth) || 1);
-        this.#assertFiniteNumbers("Point values", [x, y, size]);
+        //this.#assertFiniteNumbers("Point values", [x, y, size]);
 
         const radius = size / 2;
 
@@ -1082,7 +1082,7 @@ export class Shapes {
     static triangle(x1, y1, x2, y2, x3, y3) {
         const ctx = this.#ctx();
         this.#assertSupportedContext(ctx);
-        this.#assertFiniteNumbers("Triangle values", [x1, y1, x2, y2, x3, y3]);
+        //this.#assertFiniteNumbers("Triangle values", [x1, y1, x2, y2, x3, y3]);
 
         if (this.#isCanvas2D(ctx)) {
             ctx.beginPath();
@@ -1150,7 +1150,7 @@ export class Shapes {
     static quad(x1, y1, x2, y2, x3, y3, x4, y4) {
         const ctx = this.#ctx();
         this.#assertSupportedContext(ctx);
-        this.#assertFiniteNumbers("Quad values", [x1, y1, x2, y2, x3, y3, x4, y4]);
+        //this.#assertFiniteNumbers("Quad values", [x1, y1, x2, y2, x3, y3, x4, y4]);
 
         if (this.#isCanvas2D(ctx)) {
             ctx.beginPath();
@@ -1185,7 +1185,7 @@ export class Shapes {
     static hexagon(x, y, size) {
         const ctx = this.#ctx();
         this.#assertSupportedContext(ctx);
-        this.#assertFiniteNumbers("Hexagon values", [x, y, size]);
+        //this.#assertFiniteNumbers("Hexagon values", [x, y, size]);
         
         const radius = Math.max(0, size / 2);
         const angleOffset = Math.PI / 6;
@@ -1230,7 +1230,7 @@ export class Shapes {
     static octagon(x, y, size) {
         const ctx = this.#ctx();
         this.#assertSupportedContext(ctx);
-        this.#assertFiniteNumbers("Octagon values", [x, y, size]);
+        //this.#assertFiniteNumbers("Octagon values", [x, y, size]);
         
         const radius = Math.max(0, size / 2);
         const angleOffset = Math.PI / 8;
@@ -1632,7 +1632,7 @@ export class Shapes {
     static ellipse(x, y, w, h = w) {
         const ctx = this.#ctx();
         this.#assertSupportedContext(ctx);
-        this.#assertFiniteNumbers("Ellipse values", [x, y, w, h]);
+        //this.#assertFiniteNumbers("Ellipse values", [x, y, w, h]);
 
         const ellipse = this.#resolveEllipseGeometry(x, y, w, h);
         const centerX = ellipse.x;
@@ -2918,7 +2918,7 @@ static vertex(x, y, z = 0, u, v) {
     }
 
     // Validate x/y/z always.
-    this.#assertFiniteNumbers("Vertex values", [x, y, zVal]);
+    //this.#assertFiniteNumbers("Vertex values", [x, y, zVal]);
 
     // Validate u/v if present (WebGL use-case).
     if (typeof uVal !== "undefined" && !Number.isFinite(uVal)) {
