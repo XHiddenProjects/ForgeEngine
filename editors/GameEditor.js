@@ -3214,19 +3214,14 @@ function draw2DScene(ctx,W,H) {
           obj.__spriteImage = null;
         }
         let img = (obj.__spriteImageSrc === spriteDataURL && obj.__spriteImage) || _spriteImageCache[spriteDataURL];
-        const ready = img && img.complete && img.naturalWidth > 0;
+        const ready = img && ((img.complete === true && img.naturalWidth > 0) || img.naturalWidth > 0 || (img.width > 0 && img.height > 0));
         if(ready){
           ctx.imageSmoothingEnabled=false;
           ctx.drawImage(img,-obj.w/2,-obj.h/2,obj.w,obj.h);
         } else {
-          img = new Image();
-          obj.__spriteImage = img;
-          obj.__spriteImageSrc = spriteDataURL;
-          _spriteImageCache[spriteDataURL] = img;
-          img.onload = () => renderViewport();
-          img.onerror = () => console.warn('[FORGE] Failed to load sprite texture for viewport:', obj.name || obj.id);
-          img.src = spriteDataURL;
-          // Draw a faint placeholder only while the data URL image is loading.
+          // Use single-flight loader to avoid repeated per-frame Image() creation
+          ensureSpriteImageLoaded(obj, spriteDataURL, () => {});
+          // Draw a faint placeholder while the data URL image is loading.
           ctx.fillStyle='rgba(255,255,255,.04)'; ctx.fillRect(-obj.w/2,-obj.h/2,obj.w,obj.h);
         }
       } else {
@@ -4726,6 +4721,8 @@ function getPixelEditorDataURL(){
     // Fallback: grab the raw canvas the PixelArt instance rendered to
     const canvas = PIXELART_BRIDGE?.root?.querySelector('canvas.__pa_canvas')
                 || PIXELART_BRIDGE?.root?.querySelector('canvas')
+                || document.querySelector('#pe-canvas')
+                || document.querySelector('#pixel-editor canvas')
                 || document.querySelector('#pixel-art-editor-root canvas');
     if(canvas && typeof canvas.toDataURL==='function'){
       try{ const out=canvas.toDataURL('image/png'); if(out.startsWith('data:image')) return out; }catch(_){}
@@ -4763,11 +4760,9 @@ function savePixelArtToSprite(){
   if(!dataURL){ logConsole('error','Could not read the Pixel Art canvas.'); setStatusMsg('Pixel autosave failed'); return; }
   const selectedObj=STATE.objects.find(o=>o.id===STATE.selectedId);
   const spriteName=STATE.editingSpriteName || selectedObj?.spriteSrc || selectedObj?.name || STATE.lastEditedSpriteName || 'edited-sprite.png';
-  const w=PE?.w||32, h=PE?.h||32;
 
-  const editor2=PIXELART_BRIDGE?.instance;
-  const w2=Number(document.getElementById('pe-w')?.value)||PE?.w||32;
-  const h2=Number(document.getElementById('pe-h')?.value)||PE?.h||32;
+  const w2=Number(document.getElementById('pe-w')?.value) || PE?.w || 32;
+  const h2=Number(document.getElementById('pe-h')?.value) || PE?.h || 32;
   saveSpriteAssetData(spriteName,dataURL,w2,h2);
   let applied=applyPixelDataToSpriteObjects(spriteName,dataURL,w2,h2);
 
@@ -4846,10 +4841,12 @@ function spriteObjectMatchesAsset(obj,spriteName){
   });
 }
 function attachPixelDataToSpriteObject(obj,dataURL,w=32,h=32,spriteName=null){
-  if(!obj || obj.type!=='sprite' || !dataURL) return;
+if(!obj || obj.type!=='sprite' || !dataURL) return;
   obj.pixelDataURL=dataURL;
   obj.pixelW=w;
   obj.pixelH=h;
+  obj.w=w;
+  obj.h=h;
   obj.color='transparent';
   if(spriteName) obj.spriteSrc=spriteName;
   // Bust stale image cache so renderViewport() always reloads the updated texture
@@ -4872,9 +4869,8 @@ function applyPixelDataToSpriteObjects(spriteName,dataURL,w=32,h=32){
 }
 function primeSpriteImageAndRender(dataURL){
   if(!dataURL){ renderViewport(); return; }
-  const img=new Image();
-  img.onload=()=>{ _spriteImageCache[dataURL]=img; renderViewport(); };
-  img.src=dataURL;
+  // Prime the cache with a single-flight loader and trigger a viewport render when done
+  ensureSpriteImageLoaded(null, dataURL, () => {});
   renderViewport();
 }
 function loadSpriteDataURLIntoPixelEditor(name,dataURL,options={}){
@@ -5010,9 +5006,59 @@ function applyUploadedSpriteAssetToScene(name,dataURL,w=32,h=32){
 }
 // Cache for pixel art image elements (so we can draw dataURLs on the canvas)
 const _spriteImageCache={};
+// Single-flight loaders for dataURL/image src values
+const _spriteLoaders = {};
+
+function ensureSpriteImageLoaded(obj, src, onLoaded){
+  if(!src) return;
+  // If caller provided an object, set the src immediately so stale-cache guards work
+  if(obj) obj.__spriteImageSrc = src;
+
+  // If we already have a cached image that's complete, attach and callback immediately
+  const cached = _spriteImageCache[src];
+  if(cached && cached.complete && cached.naturalWidth > 0){
+    if(obj) obj.__spriteImage = cached;
+    try{ if(typeof onLoaded==='function') onLoaded(cached); }catch(_){}
+    return;
+  }
+
+  // If a loader is already in-flight for this src, queue the callback and optionally link the obj
+  if(_spriteLoaders[src]){
+    if(obj) obj.__spriteImage = _spriteLoaders[src].img;
+    if(typeof onLoaded==='function') _spriteLoaders[src].cbs.push(onLoaded);
+    return;
+  }
+
+  // Start loading (single-flight) using the browser DOM image constructor.
+  const img = (typeof document !== 'undefined' && document.createElement) ? document.createElement('img') : new Image();
+  if(src && src.indexOf('data:') !== 0){
+    try{ img.crossOrigin = 'Anonymous'; }catch(_){ }
+  }
+  _spriteLoaders[src] = { img: img, cbs: [] };
+  if(obj) { obj.__spriteImage = img; obj.__spriteImageLoading = true; }
+  if(typeof onLoaded==='function') _spriteLoaders[src].cbs.push(onLoaded);
+
+  img.onload = () => {
+    _spriteImageCache[src] = img;
+    // attach to object if provided
+    if(obj) { obj.__spriteImage = img; obj.__spriteImageLoading = false; }
+    const cbs = (_spriteLoaders[src] && _spriteLoaders[src].cbs) || [];
+    delete _spriteLoaders[src];
+    cbs.forEach(cb=>{ try{ cb(img); }catch(_){}});
+    try{ renderViewport(); }catch(_){ }
+  };
+  img.onerror = (e) => {
+    const cbs = (_spriteLoaders[src] && _spriteLoaders[src].cbs) || [];
+    delete _spriteLoaders[src];
+    if(obj) { obj.__spriteImage = null; obj.__spriteImageLoading = false; }
+    console.warn('[FORGE] Failed to load sprite texture:', src, e && e.message);
+    cbs.forEach(cb=>{ try{ cb(null); }catch(_){}});
+  };
+  img.src = src;
+}
 function getSpriteImage(dataURL, cb){
   if(_spriteImageCache[dataURL]){ cb(_spriteImageCache[dataURL]); return; }
-  const img=new Image(); img.onload=()=>{ _spriteImageCache[dataURL]=img; cb(img); }; img.src=dataURL;
+  ensureSpriteImageLoaded(null, dataURL, function(img){ cb(img); });
 }
 
 function exportPeSprite(){
@@ -7530,9 +7576,7 @@ function validateBlocks(){
   function primeSpriteImageV6(dataURL, cb) {
     if (!dataURL) return;
     if (_spriteImageCache[dataURL]) { if (cb) cb(_spriteImageCache[dataURL]); return; }
-    const img = new Image();
-    img.onload = function(){ _spriteImageCache[dataURL] = img; if (cb) cb(img); renderViewport(); };
-    img.src = dataURL;
+    ensureSpriteImageLoaded(null, dataURL, function(img){ if (cb) cb(img); });
   }
   function applySpriteTextureToObjectV6(obj, dataURL, sourceName) {
     if (!obj || obj.type !== 'sprite' || !dataURL) return;
@@ -8199,7 +8243,7 @@ function validateBlocks(){
         o.pixelDataURL = dataURL; o.spriteSrc = assetName; o.pixelW = (PE && PE.w)||32; o.pixelH = (PE && PE.h)||32; updated++;
       }
     });
-    var img = new Image(); img.onload = function(){ _spriteImageCache[dataURL] = img; renderViewport && renderViewport(); }; img.src = dataURL;
+    ensureSpriteImageLoaded(null, dataURL, function(){ /* renderViewport will be triggered by loader */ });
     buildHierarchy && buildHierarchy(); renderViewport && renderViewport(); buildAssetTree && buildAssetTree();
     logConsole && logConsole('success','Pixel art saved to '+assetName+' and applied to '+updated+' sprite object(s).');
     setStatusMsg && setStatusMsg('Saved sprite texture ✓');
@@ -10011,17 +10055,16 @@ function __forgeApplyPNGToSpriteObject_V21(obj, dataURL, assetName){
   obj.pixelDataURL=dataURL;
   obj.pixelW=w;
   obj.pixelH=h;
+  obj.w=w;
+  obj.h=h;
   obj.spriteSrc=assetName || obj.spriteSrc || obj.name || STATE.editingSpriteName;
   obj.assetName=obj.spriteSrc;
   obj.color='transparent';
 
   // The viewport renderer now checks this live image first.
-  const img=new Image();
-  obj.__spriteImage=img;
-  _spriteImageCache[dataURL]=img;
-  img.onload=()=>renderViewport();
-  img.onerror=()=>console.warn('[FORGE] selected sprite image failed to load', obj.name || obj.id);
-  img.src=dataURL;
+  // Mark the object as having this sprite src synchronously, then start single-flight load
+  obj.__spriteImageSrc = dataURL;
+  ensureSpriteImageLoaded(obj, dataURL, () => {});
   return obj;
 }
 
@@ -10072,11 +10115,15 @@ function savePixelArtToSprite(){
   buildAssetTree();
   if(selectedSprite){ STATE.selectedId=selectedSprite.id; }
   updateStatusBar?.();
-  renderViewport();
-  setTimeout(renderViewport, 0);
-  requestAnimationFrame(renderViewport);
 
-  logConsole('success','Pixel art saved and FORCED onto selected sprite: '+(selectedSprite?.name || assetName)+' ('+applied.length+' object(s)).');
+  // HOTFIX V22: wait for the PNG to be in the single-flight cache before rendering.
+  // This avoids the transparent-block race when returning to the viewport.
+  ensureSpriteImageLoaded(applied[0] || null, dataURL, () => {
+    try{ renderViewport(); }catch(_){}
+    try{ requestAnimationFrame(renderViewport); }catch(_){}
+  });
+
+  logConsole('success','Pixel art saved and applied to selected sprite: '+(selectedSprite?.name || assetName)+' ('+applied.length+' object(s)).');
   setStatusMsg('Selected sprite updated from Pixel Art ✓');
 }
 
@@ -10086,7 +10133,8 @@ function savePixelArtToSprite(){
 function donePixelEditorV8(){
   savePixelArtToSprite();
   setEditorTab('viewport');
-  renderViewport();
+  const src = STATE.lastSpriteDataURL;
+  if(src) ensureSpriteImageLoaded(null, src, () => { try{ renderViewport(); }catch(_){} });
 }
 
 // Re-expose for buttons/inline handlers that captured window names.

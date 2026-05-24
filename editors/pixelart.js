@@ -255,6 +255,9 @@ export class PixelArt {
     loadFromDataURL(dataURL, opts = {}) {
         if (!dataURL) return Promise.resolve();
         const { resize = false } = opts;
+        if (!resize) {
+            this.#activeLayer().pixels.fill(null);
+        }
         return this.importImage(dataURL, { newLayer: false, resize });
     }
 
@@ -1276,10 +1279,6 @@ export class PixelArt {
         wSlider.style.width = "70px";
         wSlider.addEventListener("input", e => {
             const v = Math.max(2, Math.min(128, +e.target.value));
-            wOut.textContent = v;
-        });
-        wSlider.addEventListener("change", e => {
-            const v = Math.max(2, Math.min(128, +e.target.value));
             this.resize(v, this.#rows);
             wOut.textContent = this.#cols;
             hSlider.value = String(this.#rows);
@@ -1294,10 +1293,6 @@ export class PixelArt {
         const hSlider = this.#el("input", { type:"range", class:"__pa_range", min:"2", max:"128", value:String(this.#rows), title:"Canvas height" });
         hSlider.style.width = "70px";
         hSlider.addEventListener("input", e => {
-            const v = Math.max(2, Math.min(128, +e.target.value));
-            hOut.textContent = v;
-        });
-        hSlider.addEventListener("change", e => {
             const v = Math.max(2, Math.min(128, +e.target.value));
             this.resize(this.#cols, v);
             hOut.textContent = this.#rows;
