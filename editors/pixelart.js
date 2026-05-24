@@ -697,6 +697,9 @@ export class PixelArt {
         this.#saveHistory();
         this.render();
         if (this.#statusSize) this.#statusSize.textContent = `${cols}×${rows}`;
+        // Sync toolbar sliders/labels if they exist
+        if (this._wSlider) { this._wSlider.value = String(this.#cols); this._wOut.textContent = this.#cols; }
+        if (this._hSlider) { this._hSlider.value = String(this.#rows); this._hOut.textContent = this.#rows; }
     }
 
     /** Flip the active layer horizontally */
@@ -1264,6 +1267,50 @@ export class PixelArt {
         const opacCtrl = this.#el("div", { class:"__pa_ctrl" });
         opacCtrl.append(this.#lbl("Opacity"), opacSlider, opacOut);
         toolbar.appendChild(opacCtrl);
+
+        toolbar.appendChild(this.#sep());
+
+        // Width slider
+        const wOut = this.#el("span", { class: "__pa_valout" }); wOut.textContent = this.#cols;
+        const wSlider = this.#el("input", { type:"range", class:"__pa_range", min:"2", max:"128", value:String(this.#cols), title:"Canvas width" });
+        wSlider.style.width = "70px";
+        wSlider.addEventListener("input", e => {
+            const v = Math.max(2, Math.min(128, +e.target.value));
+            wOut.textContent = v;
+        });
+        wSlider.addEventListener("change", e => {
+            const v = Math.max(2, Math.min(128, +e.target.value));
+            this.resize(v, this.#rows);
+            wOut.textContent = this.#cols;
+            hSlider.value = String(this.#rows);
+            hOut.textContent = this.#rows;
+        });
+        const wCtrl = this.#el("div", { class:"__pa_ctrl" });
+        wCtrl.append(this.#lbl("W"), wSlider, wOut);
+        toolbar.appendChild(wCtrl);
+
+        // Height slider
+        const hOut = this.#el("span", { class: "__pa_valout" }); hOut.textContent = this.#rows;
+        const hSlider = this.#el("input", { type:"range", class:"__pa_range", min:"2", max:"128", value:String(this.#rows), title:"Canvas height" });
+        hSlider.style.width = "70px";
+        hSlider.addEventListener("input", e => {
+            const v = Math.max(2, Math.min(128, +e.target.value));
+            hOut.textContent = v;
+        });
+        hSlider.addEventListener("change", e => {
+            const v = Math.max(2, Math.min(128, +e.target.value));
+            this.resize(this.#cols, v);
+            hOut.textContent = this.#rows;
+            wSlider.value = String(this.#cols);
+            wOut.textContent = this.#cols;
+        });
+        const hCtrl = this.#el("div", { class:"__pa_ctrl" });
+        hCtrl.append(this.#lbl("H"), hSlider, hOut);
+        toolbar.appendChild(hCtrl);
+
+        // Store references so resize() can sync them
+        this._wSlider = wSlider; this._wOut = wOut;
+        this._hSlider = hSlider; this._hOut = hOut;
 
         toolbar.appendChild(this.#sep());
 

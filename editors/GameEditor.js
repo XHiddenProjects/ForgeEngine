@@ -1364,6 +1364,62 @@ html,body {
   overflow:hidden;
 }
 
+/* ── Original sprite reference panel ── */
+.pe-reference {
+  width:110px;
+  min-width:110px;
+  background:var(--bg1);
+  border-right:1px solid var(--border);
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  padding:8px 6px;
+  gap:6px;
+  overflow:hidden;
+}
+.pe-reference-title {
+  font-size:9px;
+  font-weight:700;
+  letter-spacing:1px;
+  color:var(--text2);
+  text-transform:uppercase;
+  width:100%;
+  text-align:center;
+}
+.pe-reference-canvas {
+  image-rendering:pixelated;
+  border:1px solid var(--border2);
+  border-radius:2px;
+  background:repeating-conic-gradient(#1a1a2a 0% 25%, #111120 0% 50%) 0 0 / 8px 8px;
+  max-width:96px;
+  max-height:96px;
+  width:96px;
+  height:96px;
+  object-fit:contain;
+}
+.pe-reference-label {
+  font-size:9px;
+  color:var(--text2);
+  text-align:center;
+  word-break:break-all;
+  line-height:1.3;
+  max-width:98px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.pe-edited-canvas {
+  image-rendering:pixelated;
+  border:1px solid var(--accent);
+  border-radius:2px;
+  background:repeating-conic-gradient(#1a1a2a 0% 25%, #111120 0% 50%) 0 0 / 8px 8px;
+  max-width:96px;
+  max-height:96px;
+  width:96px;
+  height:96px;
+  object-fit:contain;
+}
+
 .pe-tools {
   width:52px;
   background:var(--bg1);
@@ -2267,6 +2323,14 @@ const GAME_EDITOR_MARKUP = `<div id="app">
 
         <!-- PIXEL EDITOR -->
         <div id="pixel-editor" class="hidden">
+          <!-- Original + Edited sprite reference -->
+          <div class="pe-reference" id="pe-reference-panel" style="display:none">
+            <div class="pe-reference-title">Original</div>
+            <canvas class="pe-reference-canvas" id="pe-ref-canvas" width="32" height="32" title="Original uploaded sprite"></canvas>
+            <div class="pe-reference-label" id="pe-ref-label">—</div>
+            <div class="pe-reference-title" style="margin-top:4px">Edited</div>
+            <canvas class="pe-edited-canvas" id="pe-edited-canvas" width="32" height="32" title="Current edited sprite"></canvas>
+          </div>
           <div class="pe-tools" id="pe-tools"></div>
           <div class="pe-center">
             <div class="pe-checkerboard"></div>
@@ -2289,11 +2353,11 @@ const GAME_EDITOR_MARKUP = `<div id="app">
               <div class="pe-section-title">Canvas Size</div>
               <div class="prop-row">
                 <span class="prop-label">Width</span>
-                <input class="prop-input" id="pe-w" type="number" value="32" min="4" max="512" style="width:60px" onchange="resizePeCanvas()"/>
+                <input class="prop-input" id="pe-w" type="number" value="32" min="4" max="512" style="width:60px" oninput="resizePeCanvas()" onchange="resizePeCanvas()"/>
               </div>
               <div class="prop-row">
                 <span class="prop-label">Height</span>
-                <input class="prop-input" id="pe-h" type="number" value="32" min="4" max="512" style="width:60px" onchange="resizePeCanvas()"/>
+                <input class="prop-input" id="pe-h" type="number" value="32" min="4" max="512" style="width:60px" oninput="resizePeCanvas()" onchange="resizePeCanvas()"/>
               </div>
               <div class="prop-row">
                 <span class="prop-label">Zoom</span>
@@ -2420,6 +2484,15 @@ const STATE = {
     renderPixelated: true,
     autoSave: false,
     show3DStats: true,
+    multiplayer: {
+      enabled: false,
+      mode: 'local',
+      roomId: '',
+      maxPlayers: 4,
+      tickRate: 30,
+      autoHost: true,
+      syncScene: true,
+    },
   },
   objects: [],
   nextId: 10,
@@ -2751,6 +2824,8 @@ document.addEventListener('keydown', e => {
 document.addEventListener('click', e => {
   document.querySelectorAll('.dropdown').forEach(d=>d.classList.remove('open'));
 });
+document.addEventListener('visibilitychange',()=>{ if(document.hidden) autosavePixelEditorToSpritePreview?.(); });
+window.addEventListener('beforeunload',()=>{ autosavePixelEditorToSpritePreview?.(); });
 
 // ═══════════════════════════════════════════════════════
 //  MENUS / NAV
@@ -2845,20 +2920,13 @@ function openAsset(name, icon) {
     // Open pixel editor with this sprite loaded
     STATE.editingSpriteName = name;
     setEditorTab('pixels');
-    // Load saved pixel art for this sprite if available
+    // Load saved/uploaded sprite pixels directly into the native Pixel Editor layers.
     requestAnimationFrame(() => {
-      const editor = ensurePixelArtEditor?.();
-      if (editor) {
-        const savedData = SPRITE_PIXELDATA?.[name] || STATE.spritePixelData?.[name]?.dataURL;
-        const savedURL = typeof savedData === 'string' ? savedData : savedData?.dataURL;
-        if (savedURL) {
-          try {
-            if (editor.loadFromDataURL) editor.loadFromDataURL(savedURL);
-            else if (editor.importImage) editor.importImage(savedURL, { newLayer: false, resize: false });
-          } catch (_) {}
-        } else if (editor.clear) {
-          try { editor.clear?.(); } catch (_) {}
-        }
+      const savedURL = getSpriteDataURLByName(name) || STATE.assetData?.[name]?.dataURL || null;
+      if(savedURL) loadSpriteDataURLIntoPixelEditor(name,savedURL);
+      else {
+        const editor = ensurePixelArtEditor?.();
+        if(editor?.clear) { try { editor.clear(); } catch (_) {} }
       }
     });
     logConsole('info', \`Opened sprite in Pixel Editor: \${name}\`);
@@ -3063,12 +3131,9 @@ function buildHierarchy() {
         setEditorTab('pixels');
         requestAnimationFrame(()=>{
           const editor = ensurePixelArtEditor?.();
-          if(editor && obj.pixelDataURL){
-            try {
-              if (editor.loadFromDataURL) editor.loadFromDataURL(obj.pixelDataURL);
-              else if (editor.importImage) editor.importImage(obj.pixelDataURL, { newLayer: false, resize: false });
-            } catch(_) {}
-          }
+          const savedURL = getSpriteDataURLForObject(obj);
+          if(savedURL) loadSpriteDataURLIntoPixelEditor(STATE.editingSpriteName,savedURL);
+          else if(editor?.clear){ try { editor.clear(); } catch(_) {} }
         });
         logConsole('info',\`Editing sprite: \${obj.name} in Pixel Editor\`);
         setStatusMsg(\`Editing: \${obj.name}\`);
@@ -3141,15 +3206,32 @@ function draw2DScene(ctx,W,H) {
       ctx.fillStyle='#fbbf24';ctx.font=\`\${9/z}px Share Tech Mono\`;ctx.textAlign='center';
       ctx.fillText('CAM',0,obj.h/2+14/z);
     } else if(obj.type==='sprite'){
-      if(obj.pixelDataURL){
-        const img=_spriteImageCache[obj.pixelDataURL];
-        if(img){ ctx.imageSmoothingEnabled=false; ctx.drawImage(img,-obj.w/2,-obj.h/2,obj.w,obj.h); }
-        else { getSpriteImage(obj.pixelDataURL,()=>renderViewport()); ctx.fillStyle=obj.color; ctx.fillRect(-obj.w/2,-obj.h/2,obj.w,obj.h); }
+      const spriteDataURL=getSpriteDataURLForObject(obj);
+      if(spriteDataURL){
+        // Always use spriteDataURL as the cache key. obj.__spriteImage is only valid
+        // when it was loaded from the current spriteDataURL -- bust it on mismatch.
+        if(obj.__spriteImage && obj.__spriteImageSrc !== spriteDataURL){
+          obj.__spriteImage = null;
+        }
+        let img = (obj.__spriteImageSrc === spriteDataURL && obj.__spriteImage) || _spriteImageCache[spriteDataURL];
+        const ready = img && img.complete && img.naturalWidth > 0;
+        if(ready){
+          ctx.imageSmoothingEnabled=false;
+          ctx.drawImage(img,-obj.w/2,-obj.h/2,obj.w,obj.h);
+        } else {
+          img = new Image();
+          obj.__spriteImage = img;
+          obj.__spriteImageSrc = spriteDataURL;
+          _spriteImageCache[spriteDataURL] = img;
+          img.onload = () => renderViewport();
+          img.onerror = () => console.warn('[FORGE] Failed to load sprite texture for viewport:', obj.name || obj.id);
+          img.src = spriteDataURL;
+          // Draw a faint placeholder only while the data URL image is loading.
+          ctx.fillStyle='rgba(255,255,255,.04)'; ctx.fillRect(-obj.w/2,-obj.h/2,obj.w,obj.h);
+        }
       } else {
-        ctx.fillStyle=obj.color; ctx.fillRect(-obj.w/2,-obj.h/2,obj.w,obj.h);
-        ctx.fillStyle='rgba(255,255,255,.12)'; ctx.fillRect(-obj.w/2+4,-obj.h/2+4,obj.w-8,obj.h/2-8);
-        ctx.fillStyle='rgba(255,255,255,.6)';ctx.font=\`\${9/z}px Share Tech Mono\`;ctx.textAlign='center';
-        ctx.fillText(obj.name.toUpperCase(),0,4/z);
+        ctx.fillStyle='rgba(255,255,255,.04)'; ctx.fillRect(-obj.w/2,-obj.h/2,obj.w,obj.h);
+        ctx.strokeStyle='rgba(0,212,255,.35)'; ctx.lineWidth=1/z; ctx.strokeRect(-obj.w/2,-obj.h/2,obj.w,obj.h);
       }
     } else if(obj.type==='shape'){
       ctx.fillStyle=obj.color;ctx.fillRect(-obj.w/2,-obj.h/2,obj.w,obj.h);
@@ -3823,6 +3905,15 @@ function addObject(type) {
     type,x:200+Math.random()*400,y:100+Math.random()*250,
     ...d,z:0,rot:0,scaleX:1,scaleY:1,visible:true,locked:false,tag:type
   };
+  if(type==='sprite'){
+    // New sprites intentionally start transparent. They only receive a texture
+    // after this sprite is edited in the Pixel Art editor or an asset is assigned.
+    obj.color='transparent';
+    obj.pixelDataURL=null;
+    obj.pixelW=PE?.w||32;
+    obj.pixelH=PE?.h||32;
+    obj.spriteSrc=null;
+  }
   STATE.objects.push(obj);
   // STATE.objects++ removed: STATE.objects is an array; updateStatusBar() reads its length.
   buildHierarchy();renderViewport();updateStatusBar();
@@ -4468,6 +4559,14 @@ function bindPeEvents(){
   PE.canvas.addEventListener('mousemove',e=>{if(PE.painting)pePaint(e);});
   PE.canvas.addEventListener('mouseup',()=>PE.painting=false);
   PE.canvas.addEventListener('mouseleave',()=>PE.painting=false);
+  ['pe-w','pe-h'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el && !el.__forgeLiveResizeBound){
+      el.addEventListener('input', resizePeCanvas);
+      el.addEventListener('change', resizePeCanvas);
+      el.__forgeLiveResizeBound=true;
+    }
+  });
 }
 
 function pePaint(e){
@@ -4489,6 +4588,7 @@ function pePaint(e){
     }
   }
   drawPeCanvas();
+  schedulePixelEditorSpritePreviewSync();
 }
 
 function setPixel(layer,x,y,hex){
@@ -4564,15 +4664,40 @@ function renderPeLayers(){
 }
 function togglePeLayer(i){
   PE.layers[i].visible=!PE.layers[i].visible;
-  drawPeCanvas();renderPeLayers();
+  drawPeCanvas();renderPeLayers();schedulePixelEditorSpritePreviewSync();
 }
 function resizePeCanvas(){
-    ensurePixelArtBridgeState();
-
-  PE.w=Math.max(4, Math.min(512, +document.getElementById('pe-w').value||32));
-  PE.h=Math.max(4, Math.min(512, +document.getElementById('pe-h').value||32));
-  PE.layers.forEach(layer=>{layer.data=new Uint8ClampedArray(PE.w*PE.h*4);});
-  applySizeAndZoom();drawPeCanvas();renderPeLayers();
+  ensurePixelArtBridgeState();
+  const wInput=document.getElementById('pe-w');
+  const hInput=document.getElementById('pe-h');
+  const oldW=PE.w||32, oldH=PE.h||32;
+  const newW=Math.max(4, Math.min(512, +wInput?.value||32));
+  const newH=Math.max(4, Math.min(512, +hInput?.value||32));
+  if(wInput && +wInput.value!==newW) wInput.value=newW;
+  if(hInput && +hInput.value!==newH) hInput.value=newH;
+  if(newW===oldW && newH===oldH){ applySizeAndZoom(); drawPeCanvas(); renderPeLayers(); schedulePixelEditorSpritePreviewSync(); return; }
+  PE.layers.forEach(layer=>{
+    const oldData=layer.data || new Uint8ClampedArray(oldW*oldH*4);
+    const newData=new Uint8ClampedArray(newW*newH*4);
+    const copyW=Math.min(oldW,newW), copyH=Math.min(oldH,newH);
+    for(let y=0;y<copyH;y++){
+      for(let x=0;x<copyW;x++){
+        const src=(y*oldW+x)*4, dst=(y*newW+x)*4;
+        newData[dst]=oldData[src]||0; newData[dst+1]=oldData[src+1]||0; newData[dst+2]=oldData[src+2]||0; newData[dst+3]=oldData[src+3]||0;
+      }
+    }
+    layer.data=newData;
+  });
+  PE.w=newW; PE.h=newH;
+  const selectedObj=STATE.objects.find(o=>o.id===STATE.selectedId);
+  if(selectedObj?.type==='sprite'){
+    selectedObj.w=newW; selectedObj.h=newH; selectedObj.pixelW=newW; selectedObj.pixelH=newH;
+  }
+  applySizeAndZoom();
+  drawPeCanvas();
+  renderPeLayers();
+  schedulePixelEditorSpritePreviewSync();
+  renderViewport();
 }
 function setPeZoom(v){
     ensurePixelArtBridgeState();
@@ -4580,44 +4705,308 @@ function setPeZoom(v){
   PE.zoom=+v;applySizeAndZoom();
 }
 function getPixelEditorDataURL(){
-  const editor = ensurePixelArtEditor?.();
+  // PRIMARY: always read from the live PixelArt instance (pixelart.js) — it is the
+  // only thing the user actually draws on. The legacy PE.layers path is never
+  // populated by the new editor and must come last as a last-resort fallback only.
+  const editor = PIXELART_BRIDGE?.instance;
   if(editor){
     const methodNames=['exportPNG','toDataURL','getDataURL','getPNGDataURL','exportDataURL'];
     for(const name of methodNames){
       if(typeof editor[name]==='function'){
-        try{ const out=editor[name]('image/png'); if(typeof out==='string' && out.startsWith('data:image')) return out; }catch(_){}
-        try{ const out=editor[name](); if(typeof out==='string' && out.startsWith('data:image')) return out; }catch(_){}
+        try{
+          const out=editor[name]('image/png');
+          if(typeof out==='string' && out.startsWith('data:image')) return out;
+        }catch(_){}
+        try{
+          const out=editor[name]();
+          if(typeof out==='string' && out.startsWith('data:image')) return out;
+        }catch(_){}
       }
     }
-    const canvas = editor.canvas || editor.previewCanvas || PIXELART_BRIDGE?.root?.querySelector('canvas') || document.querySelector('#pixel-art-editor-root canvas');
+    // Fallback: grab the raw canvas the PixelArt instance rendered to
+    const canvas = PIXELART_BRIDGE?.root?.querySelector('canvas.__pa_canvas')
+                || PIXELART_BRIDGE?.root?.querySelector('canvas')
+                || document.querySelector('#pixel-art-editor-root canvas');
     if(canvas && typeof canvas.toDataURL==='function'){
-      try { return canvas.toDataURL('image/png'); } catch(_) {}
+      try{ const out=canvas.toDataURL('image/png'); if(out.startsWith('data:image')) return out; }catch(_){}
     }
   }
-  if(PE?.layers && PE?.w && PE?.h){
-    const tempCanvas=document.createElement('canvas'); tempCanvas.width=PE.w; tempCanvas.height=PE.h; const tc=tempCanvas.getContext('2d');
-    PE.layers.forEach(layer=>{ if(!layer.visible)return; const id=new ImageData(new Uint8ClampedArray(layer.data),PE.w,PE.h); tc.putImageData(id,0,0); });
-    return tempCanvas.toDataURL('image/png');
-  }
+
+  // LEGACY FALLBACK: old inline PE.layers (only populated by the pre-pixelart.js editor)
+  try{
+    if(PE && PE.layers && PE.w && PE.h){
+      const tempCanvas=document.createElement('canvas');
+      tempCanvas.width=PE.w; tempCanvas.height=PE.h;
+      const tc=tempCanvas.getContext('2d');
+      let hasPixels=false;
+      PE.layers.forEach(layer=>{
+        if(!layer || !layer.visible || !layer.data) return;
+        for(let i=3;i<layer.data.length;i+=4){ if(layer.data[i]>0){ hasPixels=true; break; } }
+        const id=new ImageData(new Uint8ClampedArray(layer.data),PE.w,PE.h);
+        tc.putImageData(id,0,0);
+      });
+      if(hasPixels) return tempCanvas.toDataURL('image/png');
+    }
+  }catch(_){}
+
+  try{
+    if(PE && PE.canvas && typeof PE.canvas.toDataURL==='function'){
+      const out=PE.canvas.toDataURL('image/png');
+      if(typeof out==='string' && out.startsWith('data:image')) return out;
+    }
+  }catch(_){}
+
   return null;
 }
 function savePixelArtToSprite(){
   const dataURL=getPixelEditorDataURL();
-  if(!dataURL){ logConsole('error','Could not read the Pixel Art canvas.'); setStatusMsg('Pixel save failed'); return; }
+  if(!dataURL){ logConsole('error','Could not read the Pixel Art canvas.'); setStatusMsg('Pixel autosave failed'); return; }
   const selectedObj=STATE.objects.find(o=>o.id===STATE.selectedId);
-  const targetObj=selectedObj?.type==='sprite' ? selectedObj : (STATE.editingSpriteName ? STATE.objects.find(o=>o.type==='sprite'&&(o.spriteSrc===STATE.editingSpriteName||o.name.toLowerCase().includes(String(STATE.editingSpriteName).split('.')[0].toLowerCase()))) : null);
-  if(STATE.editingSpriteName){
-    if(!STATE.spritePixelData) STATE.spritePixelData={};
-    STATE.spritePixelData[STATE.editingSpriteName]={dataURL,w:PE?.w||32,h:PE?.h||32,updatedAt:Date.now()};
-    SPRITE_PIXELDATA[STATE.editingSpriteName]=dataURL;
-    logConsole('success',\`Pixel art saved to asset: \${STATE.editingSpriteName}\`);
+  const spriteName=STATE.editingSpriteName || selectedObj?.spriteSrc || selectedObj?.name || STATE.lastEditedSpriteName || 'edited-sprite.png';
+  const w=PE?.w||32, h=PE?.h||32;
+
+  const editor2=PIXELART_BRIDGE?.instance;
+  const w2=Number(document.getElementById('pe-w')?.value)||PE?.w||32;
+  const h2=Number(document.getElementById('pe-h')?.value)||PE?.h||32;
+  saveSpriteAssetData(spriteName,dataURL,w2,h2);
+  let applied=applyPixelDataToSpriteObjects(spriteName,dataURL,w2,h2);
+
+  // Always update the selected sprite; this is the active object being edited.
+  if(selectedObj?.type==='sprite' && !applied.includes(selectedObj)){
+    attachPixelDataToSpriteObject(selectedObj,dataURL,w2,h2,spriteName);
+    applied.push(selectedObj);
   }
-  if(targetObj){
-    targetObj.pixelDataURL=dataURL; targetObj.pixelW=PE?.w||32; targetObj.pixelH=PE?.h||32; if(STATE.editingSpriteName) targetObj.spriteSrc=STATE.editingSpriteName;
-    const img=new Image(); img.onload=()=>{ _spriteImageCache[dataURL]=img; renderViewport(); }; img.src=dataURL;
-    renderViewport(); buildHierarchy(); logConsole('success',\`Pixel art saved and applied to: \${targetObj.name}\`); setStatusMsg(\`Saved to sprite: \${targetObj.name} ✓\`);
-  } else if(STATE.editingSpriteName){ setStatusMsg(\`Saved to asset: \${STATE.editingSpriteName} ✓\`); }
-  else { logConsole('warn','No sprite selected — select a sprite object first, then save.'); setStatusMsg('Select a sprite to save to'); }
+  primeSpriteImageAndRender(dataURL);
+  buildHierarchy();
+  setStatusMsg('Sprite saved ✓');
+  logConsole('success','Pixel art saved to '+spriteName+' ('+applied.length+' object(s)).');
+}
+function normalizeSpriteAssetName(value){
+  return String(value || '').trim().toLowerCase();
+}
+function spriteBaseName(value){
+  return normalizeSpriteAssetName(value).replace(/\.(png|jpg|jpeg|gif|webp)$/i,'');
+}
+function saveSpriteAssetData(name,dataURL,w=32,h=32){
+  if(!name || !dataURL) return;
+  if(!STATE.spritePixelData) STATE.spritePixelData={};
+  STATE.spritePixelData[name]={dataURL,w,h,updatedAt:Date.now()};
+  SPRITE_PIXELDATA[name]=dataURL;
+  STATE.lastEditedSpriteName=name;
+  STATE.lastSpriteDataURL=dataURL;
+}
+function getSpriteDataURLByName(name){
+  if(!name) return null;
+  const exact = SPRITE_PIXELDATA?.[name] || STATE.spritePixelData?.[name]?.dataURL || STATE.spritePixelData?.[name];
+  if(typeof exact === 'string') return exact;
+  if(exact?.dataURL) return exact.dataURL;
+  const target=normalizeSpriteAssetName(name), targetBase=spriteBaseName(name);
+  const stores=[SPRITE_PIXELDATA, STATE.spritePixelData || {}];
+  for(const store of stores){
+    for(const key of Object.keys(store || {})){
+      const keyNorm=normalizeSpriteAssetName(key), keyBase=spriteBaseName(key);
+      if(keyNorm===target || keyBase===targetBase){
+        const value=store[key];
+        if(typeof value==='string') return value;
+        if(value?.dataURL) return value.dataURL;
+      }
+    }
+  }
+  return null;
+}
+function getLatestSpriteDataURL(){
+  if(STATE.lastSpriteDataURL) return STATE.lastSpriteDataURL;
+  if(STATE.lastEditedSpriteName){
+    const url=getSpriteDataURLByName(STATE.lastEditedSpriteName);
+    if(url) return url;
+  }
+  const store=STATE.spritePixelData || SPRITE_PIXELDATA || {};
+  let best=null,bestTime=-1;
+  Object.keys(store).forEach(key=>{
+    const value=store[key];
+    const dataURL=typeof value==='string'?value:value?.dataURL;
+    const t=typeof value==='string'?0:(value?.updatedAt||0);
+    if(dataURL && t>=bestTime){ best=dataURL; bestTime=t; }
+  });
+  return best;
+}
+function getSpriteDataURLForObject(obj){
+  if(!obj || obj.type!=='sprite') return null;
+  // Do not fall back to the latest edited texture. A brand-new sprite must stay
+  // transparent until that sprite/asset is explicitly edited or assigned.
+  return obj.pixelDataURL || getSpriteDataURLByName(obj.spriteSrc) || getSpriteDataURLByName(obj.assetName) || getSpriteDataURLByName(obj.name) || null;
+}
+function spriteObjectMatchesAsset(obj,spriteName){
+  if(!obj || obj.type!=='sprite' || !spriteName) return false;
+  const target=normalizeSpriteAssetName(spriteName), targetBase=spriteBaseName(spriteName);
+  const candidates=[obj.spriteSrc,obj.assetName,obj.name].filter(Boolean);
+  return candidates.some(value=>{
+    const norm=normalizeSpriteAssetName(value), base=spriteBaseName(value);
+    return norm===target || base===targetBase || norm.includes(targetBase) || targetBase.includes(base);
+  });
+}
+function attachPixelDataToSpriteObject(obj,dataURL,w=32,h=32,spriteName=null){
+  if(!obj || obj.type!=='sprite' || !dataURL) return;
+  obj.pixelDataURL=dataURL;
+  obj.pixelW=w;
+  obj.pixelH=h;
+  obj.color='transparent';
+  if(spriteName) obj.spriteSrc=spriteName;
+  // Bust stale image cache so renderViewport() always reloads the updated texture
+  obj.__spriteImage=null;
+  obj.__spriteImageSrc=null;
+}
+function applyPixelDataToSpriteObjects(spriteName,dataURL,w=32,h=32){
+  const applied=[];
+  STATE.objects.forEach(obj=>{
+    if(!spriteName && obj.type==='sprite'){
+      attachPixelDataToSpriteObject(obj,dataURL,w,h,spriteName);
+      applied.push(obj);
+      return;
+    }
+    if(!spriteObjectMatchesAsset(obj,spriteName)) return;
+    attachPixelDataToSpriteObject(obj,dataURL,w,h,spriteName);
+    applied.push(obj);
+  });
+  return applied;
+}
+function primeSpriteImageAndRender(dataURL){
+  if(!dataURL){ renderViewport(); return; }
+  const img=new Image();
+  img.onload=()=>{ _spriteImageCache[dataURL]=img; renderViewport(); };
+  img.src=dataURL;
+  renderViewport();
+}
+function loadSpriteDataURLIntoPixelEditor(name,dataURL,options={}){
+  if(!dataURL) return Promise.resolve(false);
+  STATE.editingSpriteName=name || STATE.editingSpriteName || 'edited-sprite.png';
+  STATE.lastEditedSpriteName=STATE.editingSpriteName;
+
+  // Show original sprite in the reference panel
+  const refPanel=document.getElementById('pe-reference-panel');
+  const refCanvas=document.getElementById('pe-ref-canvas');
+  const refLabel=document.getElementById('pe-ref-label');
+  if(refPanel && refCanvas){
+    refPanel.style.display='flex';
+    const refImg=new Image();
+    refImg.onload=()=>{
+      const sz=Math.max(refImg.naturalWidth,refImg.naturalHeight)||32;
+      const scale=Math.floor(96/sz)||1;
+      refCanvas.width=refImg.naturalWidth||32;
+      refCanvas.height=refImg.naturalHeight||32;
+      refCanvas.style.width=Math.min(96,refImg.naturalWidth*scale)+'px';
+      refCanvas.style.height=Math.min(96,refImg.naturalHeight*scale)+'px';
+      const rc=refCanvas.getContext('2d');
+      rc.imageSmoothingEnabled=false;
+      rc.clearRect(0,0,refCanvas.width,refCanvas.height);
+      rc.drawImage(refImg,0,0);
+      if(refLabel) refLabel.textContent=(name||'sprite').replace(/.*\\//,'').slice(0,18);
+    };
+    refImg.src=dataURL;
+    // Store original for comparison
+    STATE._originalSpriteDataURL=dataURL;
+  }
+  return new Promise(resolve=>{
+    const img=new Image();
+    img.onload=()=>{
+      try{
+        const max=512;
+        const w=Math.max(4,Math.min(max,options.w||img.naturalWidth||img.width||32));
+        const h=Math.max(4,Math.min(max,options.h||img.naturalHeight||img.height||32));
+        PE.w=w; PE.h=h;
+        const wInput=document.getElementById('pe-w'), hInput=document.getElementById('pe-h');
+        if(wInput) wInput.value=w;
+        if(hInput) hInput.value=h;
+        const temp=document.createElement('canvas');
+        temp.width=w; temp.height=h;
+        const tc=temp.getContext('2d');
+        tc.imageSmoothingEnabled=false;
+        tc.clearRect(0,0,w,h);
+        tc.drawImage(img,0,0,w,h);
+        const imageData=tc.getImageData(0,0,w,h);
+        PE.layers=[{name:'Sprite',visible:true,active:true,data:new Uint8ClampedArray(imageData.data)}];
+        PE.activeLayer=0;
+        applySizeAndZoom();
+        drawPeCanvas();
+        renderPeLayers();
+        saveSpriteAssetData(STATE.editingSpriteName,temp.toDataURL('image/png'),w,h);
+        const selectedObj=STATE.objects.find(o=>o.id===STATE.selectedId);
+        if(selectedObj?.type==='sprite') attachPixelDataToSpriteObject(selectedObj,temp.toDataURL('image/png'),w,h,STATE.editingSpriteName);
+        applyPixelDataToSpriteObjects(STATE.editingSpriteName,temp.toDataURL('image/png'),w,h);
+        primeSpriteImageAndRender(temp.toDataURL('image/png'));
+        const editor=ensurePixelArtEditor?.();
+        if(editor){ try{ if(editor.loadFromDataURL) editor.loadFromDataURL(temp.toDataURL('image/png')); else if(editor.importImage) editor.importImage(temp.toDataURL('image/png'),{newLayer:false,resize:false}); }catch(_){} }
+        resolve(true);
+      }catch(err){ console.warn('loadSpriteDataURLIntoPixelEditor failed',err); resolve(false); }
+    };
+    img.onerror=()=>resolve(false);
+    img.src=dataURL;
+  });
+}
+let _pixelPreviewSyncRAF=null;
+function autosavePixelEditorToSpritePreview(){
+  try{
+    const dataURL=getPixelEditorDataURL();
+    if(!dataURL) return false;
+    const selectedObj=STATE.objects.find(o=>o.id===STATE.selectedId);
+    const spriteName=STATE.editingSpriteName || selectedObj?.spriteSrc || selectedObj?.name || STATE.lastEditedSpriteName || 'edited-sprite.png';
+    // Get real dimensions from the live PixelArt instance, not the stale PE legacy object
+    const editor=PIXELART_BRIDGE?.instance;
+    const w=Number(document.getElementById('pe-w')?.value)||editor?._PixelArt__cols||PE?.w||32;
+    const h=Number(document.getElementById('pe-h')?.value)||editor?._PixelArt__rows||PE?.h||32;
+    saveSpriteAssetData(spriteName,dataURL,w,h);
+    // Apply to ALL sprite objects that share this asset name, plus force-apply to selected
+    const applied=applyPixelDataToSpriteObjects(spriteName,dataURL,w,h);
+    if(selectedObj?.type==='sprite' && !applied.includes(selectedObj)) attachPixelDataToSpriteObject(selectedObj,dataURL,w,h,spriteName);
+    primeSpriteImageAndRender(dataURL);
+    // Update "Edited" preview in reference panel
+    const editedCanvas=document.getElementById('pe-edited-canvas');
+    if(editedCanvas){
+      const img=new Image();
+      img.onload=()=>{
+        const sz=Math.max(img.naturalWidth,img.naturalHeight)||32;
+        const scale=Math.floor(96/sz)||1;
+        editedCanvas.width=img.naturalWidth||w;
+        editedCanvas.height=img.naturalHeight||h;
+        editedCanvas.style.width=Math.min(96,(img.naturalWidth||w)*scale)+'px';
+        editedCanvas.style.height=Math.min(96,(img.naturalHeight||h)*scale)+'px';
+        const ec=editedCanvas.getContext('2d');
+        ec.imageSmoothingEnabled=false;
+        ec.clearRect(0,0,editedCanvas.width,editedCanvas.height);
+        ec.drawImage(img,0,0);
+      };
+      img.src=dataURL;
+    }
+    return true;
+  }catch(_){ return false; }
+}
+function schedulePixelEditorSpritePreviewSync(){
+  if(_pixelPreviewSyncRAF) return;
+  if(!STATE.editingSpriteName && !(STATE.objects.find(o=>o.id===STATE.selectedId)?.type==='sprite')) return;
+  _pixelPreviewSyncRAF=requestAnimationFrame(()=>{ _pixelPreviewSyncRAF=null; autosavePixelEditorToSpritePreview(); });
+}
+function applyUploadedSpriteAssetToScene(name,dataURL,w=32,h=32){
+  saveSpriteAssetData(name,dataURL,w,h);
+  const selectedObj=STATE.objects.find(o=>o.id===STATE.selectedId);
+  let applied=[];
+  if(selectedObj?.type==='sprite'){
+    attachPixelDataToSpriteObject(selectedObj,dataURL,w,h,name);
+    applied.push(selectedObj);
+  } else {
+    applied=applyPixelDataToSpriteObjects(name,dataURL,w,h);
+  }
+  if(!applied.length){
+    const obj={id:STATE.nextId++,name:String(name||'sprite').replace(/\.[^.]+$/,''),type:'sprite',x:200+Math.random()*300,y:120+Math.random()*220,w:48,h:48,color:'transparent',z:0,rot:0,scaleX:1,scaleY:1,visible:true,locked:false,tag:'sprite',spriteSrc:name,pixelDataURL:dataURL,pixelW:w,pixelH:h};
+    STATE.objects.push(obj);
+    STATE.selectedId=obj.id;
+    applied.push(obj);
+    updateStatusBar();
+  }
+  primeSpriteImageAndRender(dataURL);
+  buildHierarchy();
+  setStatusMsg('Imported sprite applied ✓');
+  if(STATE.editorTab==='pixels' || STATE.editingSpriteName===name) loadSpriteDataURLIntoPixelEditor(name,dataURL,{w,h});
+  return applied;
 }
 // Cache for pixel art image elements (so we can draw dataURLs on the canvas)
 const _spriteImageCache={};
@@ -4757,7 +5146,25 @@ function ensureProjectSettings(){
     backgroundColor: '#0d0f18', targetFps: 60, fixedTimestep: 16.666,
     physicsGravity: 9.8, snapSize: 20, gridStep: 50,
     renderPixelated: true, autoSave: false, show3DStats: true,
+    multiplayer: {
+      enabled: false,
+      mode: 'local',
+      roomId: '',
+      maxPlayers: 4,
+      tickRate: 30,
+      autoHost: true,
+      syncScene: true,
+    },
   }, STATE.projectSettings || {});
+  STATE.projectSettings.multiplayer = Object.assign({
+    enabled: false,
+    mode: 'local',
+    roomId: '',
+    maxPlayers: 4,
+    tickRate: 30,
+    autoHost: true,
+    syncScene: true,
+  }, STATE.projectSettings.multiplayer || {});
   return STATE.projectSettings;
 }
 function openProjectSettings(){
@@ -4775,7 +5182,18 @@ function openProjectSettings(){
           <div class="modal-row"><span class="modal-label">Mode</span><select class="modal-input" id="ps-mode"><option value="2d">2D</option><option value="3d">3D</option></select></div>
           <div class="modal-row"><span class="modal-label">BG Color</span><input class="modal-input" id="ps-bg" type="color" style="height:36px;padding:2px"/></div>
         </div>
-        <details open style="border:1px solid var(--border);border-radius:6px;padding:10px;background:rgba(255,255,255,.02)">
+        <details style="border:1px solid var(--border);border-radius:6px;padding:10px;background:rgba(0,212,255,.035);margin-bottom:10px">
+          <summary style="cursor:pointer;font-size:12px;font-weight:700;color:var(--accent);letter-spacing:.8px">Multiplayer Settings</summary>
+          <div style="height:10px"></div>
+          <div class="modal-row"><span class="modal-label">Enabled</span><input class="prop-checkbox" id="ps-mp-enabled" type="checkbox"/></div>
+          <div class="modal-row"><span class="modal-label">Mode</span><select class="modal-input" id="ps-mp-mode"><option value="local">Local test</option><option value="host">Host room</option><option value="peer">Join room</option></select></div>
+          <div class="modal-row"><span class="modal-label">Room ID</span><input class="modal-input" id="ps-mp-room" placeholder="Auto when blank"/></div>
+          <div class="modal-row"><span class="modal-label">Max Players</span><input class="modal-input" id="ps-mp-max" type="number" min="1" max="8"/></div>
+          <div class="modal-row"><span class="modal-label">Tick Rate</span><input class="modal-input" id="ps-mp-tick" type="number" min="1" max="120"/></div>
+          <div class="modal-row"><span class="modal-label">Auto Host</span><input class="prop-checkbox" id="ps-mp-autohost" type="checkbox"/></div>
+          <div class="modal-row"><span class="modal-label">Sync Scene</span><input class="prop-checkbox" id="ps-mp-sync" type="checkbox"/></div>
+        </details>
+        <details style="border:1px solid var(--border);border-radius:6px;padding:10px;background:rgba(255,255,255,.02)">
           <summary style="cursor:pointer;font-size:12px;font-weight:700;color:var(--accent);letter-spacing:.8px">Advanced Settings</summary>
           <div style="height:10px"></div>
           <div class="modal-row"><span class="modal-label">Target FPS</span><input class="modal-input" id="ps-target-fps" type="number" min="15" max="240"/></div>
@@ -4795,6 +5213,10 @@ function openProjectSettings(){
   safeEl('ps-bg').value=settings.backgroundColor || '#0d0f18'; safeEl('ps-target-fps').value=settings.targetFps; safeEl('ps-fixed-step').value=settings.fixedTimestep;
   safeEl('ps-gravity').value=settings.physicsGravity; safeEl('ps-snap-size').value=settings.snapSize; safeEl('ps-grid-step').value=settings.gridStep;
   safeEl('ps-pixelated').checked=!!settings.renderPixelated; safeEl('ps-autosave').checked=!!settings.autoSave; safeEl('ps-3d-stats').checked=!!settings.show3DStats;
+  const mp=settings.multiplayer||{};
+  safeEl('ps-mp-enabled').checked=!!mp.enabled; safeEl('ps-mp-mode').value=mp.mode||'local'; safeEl('ps-mp-room').value=mp.roomId||'';
+  safeEl('ps-mp-max').value=mp.maxPlayers||4; safeEl('ps-mp-tick').value=mp.tickRate||30;
+  safeEl('ps-mp-autohost').checked=mp.autoHost!==false; safeEl('ps-mp-sync').checked=mp.syncScene!==false;
   modal.classList.add('open');
 }
 function applyProjectSettings(){
@@ -4802,8 +5224,17 @@ function applyProjectSettings(){
   STATE.projectName=name; settings.backgroundColor=safeEl('ps-bg')?.value||settings.backgroundColor; settings.targetFps=Math.max(15,Math.min(240,+safeEl('ps-target-fps')?.value||60));
   settings.fixedTimestep=Math.max(1,+safeEl('ps-fixed-step')?.value||16.666); settings.physicsGravity=+safeEl('ps-gravity')?.value||9.8; settings.snapSize=Math.max(1,+safeEl('ps-snap-size')?.value||20);
   settings.gridStep=Math.max(5,+safeEl('ps-grid-step')?.value||50); settings.renderPixelated=!!safeEl('ps-pixelated')?.checked; settings.autoSave=!!safeEl('ps-autosave')?.checked; settings.show3DStats=!!safeEl('ps-3d-stats')?.checked;
+  settings.multiplayer={
+    enabled: !!safeEl('ps-mp-enabled')?.checked,
+    mode: safeEl('ps-mp-mode')?.value || 'local',
+    roomId: (safeEl('ps-mp-room')?.value || '').trim(),
+    maxPlayers: Math.max(1,Math.min(8,+safeEl('ps-mp-max')?.value||4)),
+    tickRate: Math.max(1,Math.min(120,+safeEl('ps-mp-tick')?.value||30)),
+    autoHost: !!safeEl('ps-mp-autohost')?.checked,
+    syncScene: !!safeEl('ps-mp-sync')?.checked,
+  };
   vpCanvas.width=w; vpCanvas.height=h; vpCanvas.style.imageRendering=settings.renderPixelated?'pixelated':'auto'; setMode(mode); buildHierarchy(); renderViewport(); updateStatusBar();
-  logConsole('success',\`Project settings updated: \${name} \${w}×\${h} \${mode.toUpperCase()} · advanced saved\`); closeModal('modal-proj-settings');
+  logConsole('success',\`Project settings updated: \${name} \${w}×\${h} \${mode.toUpperCase()} · multiplayer \${settings.multiplayer.enabled?'ON':'OFF'}\`); closeModal('modal-proj-settings');
 }
 
 function saveProject(){
@@ -6832,6 +7263,27 @@ function validateBlocks(){
       try { editor.setColor(PE.color); } catch (_) {}
     }
 
+    // Hook render() to silently sync edited pixels back to sprite objects.
+    // PixelArt calls render() after every stroke/undo/redo so this catches all edits.
+    // We debounce to 400ms so a fast paint stroke only triggers ONE sync, not hundreds.
+    const _origRender = editor.render.bind(editor);
+    let _syncTimer = null;
+    let _lastSyncURL = null;
+    editor.render = function(...args) {
+      _origRender(...args);
+      clearTimeout(_syncTimer);
+      _syncTimer = setTimeout(() => {
+        try {
+          // Only run if the pixel editor tab is actually visible
+          const pixelPanel = document.getElementById('pixel-editor');
+          if (!pixelPanel || pixelPanel.classList.contains('hidden')) return;
+          if (typeof autosavePixelEditorToSpritePreview === 'function') {
+            autosavePixelEditorToSpritePreview();
+          }
+        } catch(_) {}
+      }, 400);
+    };
+
     logConsole?.('success', 'PixelArt editor loaded from pixelart.js');
     setStatusMsg?.('PixelArt ready');
     return editor;
@@ -7298,7 +7750,11 @@ function validateBlocks(){
   function storeImportedAssetV8(sectionName,file,name,icon,value,isText){
     ensureAssetDataStoreV8();
     STATE.assetData[name]={name,originalName:file?.name||name,section:sectionName,icon,type:file?.type||'',size:file?.size||0,dataURL:isText?null:value,text:isText?String(value||''):null,importedAt:Date.now()};
-    if(sectionName==='Sprites'){ if(!STATE.spritePixelData)STATE.spritePixelData={}; STATE.spritePixelData[name]={dataURL:value,w:32,h:32,updatedAt:Date.now()}; SPRITE_PIXELDATA[name]=value; primeSpriteImageV6(value); }
+    if(sectionName==='Sprites'){
+      saveSpriteAssetData(name,value,32,32);
+      primeSpriteImageV6(value);
+      applyUploadedSpriteAssetToScene(name,value,32,32);
+    }
     if(sectionName==='Audio')STATE.audioData[name]=value;
     if(sectionName==='Scripts'||sectionName==='Shaders'||/\.(js|glsl|wgsl)$/i.test(name))SCRIPT_STORE[name]=String(value||'');
     addAssetToSectionV6(sectionName,{name,icon}); logConsole('success','Imported '+name+' to '+sectionName); setStatusMsg('Imported: '+name);
@@ -9503,6 +9959,143 @@ function validateBlocks(){
 
   bindAutoSaveV18();
 })();
+
+
+// COPILOT FIX V21: hard sync Pixel Editor -> selected viewport sprite.
+// This intentionally ignores confusing asset/editing state when a sprite object is selected:
+// the selected sprite object ALWAYS receives the current Pixel Art pixels immediately.
+function __forgeExportCurrentPixelEditorPNG_V21(){
+  // Preferred: PixelArt class public API. This is the editor shown in the Pixel Art tab.
+  try{
+    const editor = (typeof ensurePixelArtEditor === 'function') ? ensurePixelArtEditor() : null;
+    if(editor){
+      const methods=['exportPNG','toDataURL','getDataURL','getPNGDataURL','exportDataURL'];
+      for(const name of methods){
+        if(typeof editor[name] === 'function'){
+          try{ const out = editor[name]('image/png'); if(typeof out === 'string' && out.startsWith('data:image')) return out; }catch(_){}
+          try{ const out = editor[name](); if(typeof out === 'string' && out.startsWith('data:image')) return out; }catch(_){}
+        }
+      }
+    }
+  }catch(e){ console.warn('[FORGE] PixelArt export failed:', e); }
+
+  // Fallback: legacy PE layers.
+  try{
+    if(PE && Array.isArray(PE.layers) && PE.w && PE.h){
+      const out=document.createElement('canvas');
+      out.width=PE.w; out.height=PE.h;
+      const ctx=out.getContext('2d');
+      let painted=false;
+      PE.layers.forEach(layer=>{
+        if(!layer || layer.visible===false || !layer.data) return;
+        const imgData=new ImageData(new Uint8ClampedArray(layer.data), PE.w, PE.h);
+        for(let i=3;i<imgData.data.length;i+=4){ if(imgData.data[i] > 0){ painted=true; break; } }
+        ctx.putImageData(imgData,0,0);
+      });
+      if(painted) return out.toDataURL('image/png');
+    }
+  }catch(e){ console.warn('[FORGE] PE export failed:', e); }
+
+  // Last fallback: any visible pixel editor canvas.
+  try{
+    const c = document.querySelector('#pixel-editor canvas.__pa_canvas, #pixel-editor canvas, #pixel-art-editor-root canvas') || PE?.canvas;
+    if(c && typeof c.toDataURL === 'function') return c.toDataURL('image/png');
+  }catch(_){}
+  return null;
+}
+
+function __forgeApplyPNGToSpriteObject_V21(obj, dataURL, assetName){
+  if(!obj || obj.type !== 'sprite' || !dataURL) return null;
+  const w=(PE && PE.w) || obj.pixelW || obj.w || 32;
+  const h=(PE && PE.h) || obj.pixelH || obj.h || 32;
+  obj.pixelDataURL=dataURL;
+  obj.pixelW=w;
+  obj.pixelH=h;
+  obj.spriteSrc=assetName || obj.spriteSrc || obj.name || STATE.editingSpriteName;
+  obj.assetName=obj.spriteSrc;
+  obj.color='transparent';
+
+  // The viewport renderer now checks this live image first.
+  const img=new Image();
+  obj.__spriteImage=img;
+  _spriteImageCache[dataURL]=img;
+  img.onload=()=>renderViewport();
+  img.onerror=()=>console.warn('[FORGE] selected sprite image failed to load', obj.name || obj.id);
+  img.src=dataURL;
+  return obj;
+}
+
+function savePixelArtToSprite(){
+  const dataURL=__forgeExportCurrentPixelEditorPNG_V21();
+  if(!dataURL){
+    logConsole('error','Could not read the Pixel Art canvas.');
+    setStatusMsg('Pixel save failed');
+    return;
+  }
+
+  const selectedObj=STATE.objects.find(o=>o.id===STATE.selectedId);
+  const selectedSprite=(selectedObj && selectedObj.type==='sprite') ? selectedObj : null;
+  const assetName = selectedSprite?.spriteSrc || STATE.editingSpriteName || selectedSprite?.name || STATE.lastEditedSpriteName || STATE.lastSpriteAssetName || ('sprite-' + Date.now() + '.png');
+  const w=(PE && PE.w) || selectedSprite?.pixelW || 32;
+  const h=(PE && PE.h) || selectedSprite?.pixelH || 32;
+
+  if(!STATE.spritePixelData) STATE.spritePixelData={};
+  STATE.spritePixelData[assetName]={dataURL,w,h,updatedAt:Date.now()};
+  SPRITE_PIXELDATA[assetName]=dataURL;
+  STATE.editingSpriteName=assetName;
+  STATE.lastEditedSpriteName=assetName;
+  STATE.lastSpriteAssetName=assetName;
+  STATE.lastSpriteDataURL=dataURL;
+  try{ addAssetToSectionV6?.('Sprites', {name:assetName, icon:'🖼'}); }catch(_){}
+
+  const applied=[];
+  if(selectedSprite){
+    __forgeApplyPNGToSpriteObject_V21(selectedSprite, dataURL, assetName);
+    applied.push(selectedSprite);
+  }
+
+  // Also update clones/instances of the same sprite asset, but never skip the selected one.
+  STATE.objects.forEach(obj=>{
+    if(!obj || obj.type!=='sprite' || obj===selectedSprite) return;
+    const same = obj.spriteSrc===assetName || obj.assetName===assetName || obj.name===assetName ||
+      (typeof spriteBaseName==='function' && (spriteBaseName(obj.spriteSrc)===spriteBaseName(assetName) || spriteBaseName(obj.name)===spriteBaseName(assetName)));
+    if(same){ __forgeApplyPNGToSpriteObject_V21(obj, dataURL, assetName); applied.push(obj); }
+  });
+
+  // If no sprite object was selected, apply to first matching object so the viewport still updates.
+  if(!applied.length){
+    const first=STATE.objects.find(o=>o.type==='sprite' && (o.spriteSrc===assetName || o.name===assetName));
+    if(first){ __forgeApplyPNGToSpriteObject_V21(first, dataURL, assetName); applied.push(first); STATE.selectedId=first.id; }
+  }
+
+  buildHierarchy();
+  buildAssetTree();
+  if(selectedSprite){ STATE.selectedId=selectedSprite.id; }
+  updateStatusBar?.();
+  renderViewport();
+  setTimeout(renderViewport, 0);
+  requestAnimationFrame(renderViewport);
+
+  logConsole('success','Pixel art saved and FORCED onto selected sprite: '+(selectedSprite?.name || assetName)+' ('+applied.length+' object(s)).');
+  setStatusMsg('Selected sprite updated from Pixel Art ✓');
+}
+
+// NOTE: autosavePixelEditorToSpritePreview is defined earlier and should NOT be
+// overridden here -- the earlier version does a silent background sync without
+// logging. donePixelEditorV8 uses the explicit save (with log) only on Done click.
+function donePixelEditorV8(){
+  savePixelArtToSprite();
+  setEditorTab('viewport');
+  renderViewport();
+}
+
+// Re-expose for buttons/inline handlers that captured window names.
+if(typeof window !== 'undefined'){
+  window.savePixelArtToSprite=savePixelArtToSprite;
+  window.donePixelEditorV8=donePixelEditorV8;
+  // Do NOT re-expose autosavePixelEditorToSpritePreview here -- the earlier
+  // silent version must win to prevent console spam.
+}
 
 return { STATE, LIBS, BLOCK_DEFS, ASSET_TREE, BE, PE, PIXELART_BRIDGE, destroyPixelEditor };
 `;
