@@ -2,13 +2,16 @@
     "name": "ForgeEngine",
     "description": "ForgeEngine is a open-source web based game development engine",
     "version": "1.0.0",
-    "main": "utils/index.js",
+    "main": "index.js",
     "license": "MIT",
     "scripts": {
-        "start": "node server.js"
+        "start": "concurrently \"node server.js\" \"node index.js\""
     },
     "dependencies": {
         "express": "^4.19.2",
         "open": "^10.1.0"
+    },
+    "devDependencies": {
+        "concurrently": "^10.0.3"
     }
 }
