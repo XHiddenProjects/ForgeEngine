@@ -1,0 +1,10 @@
+{
+  "name": "@forgeEngine/core",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "@forgeEngine/2d": "^1.0.0",
+    "@forgeEngine/3d": "^1.0.0",
+    "@forgeEngine/utils": "^1.0.0"
+  }
+}
