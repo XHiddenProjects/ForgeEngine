@@ -6,18 +6,26 @@
 // here would collide with any other same-named top-level declaration
 // sharing that global scope.
 (function (root, factory) {
-    const Canvas = factory();
     if (typeof module === 'object' && module.exports) {
+        const Canvas = factory(require('./color'));
         module.exports = Canvas;
         module.exports.Canvas = Canvas;
     } else if (root) {
-        root.Canvas = Canvas;
+        root.Canvas = factory(root.Color);
     }
-})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (Color) {
+    if (!Color || typeof Color.color !== 'function' || typeof Color.toString !== 'function') {
+        throw new Error('Canvas requires the Color class from color.js.');
+    }
+
+    const cssColor = value => Color.toString(Color.color(value));
 /**
  * Creates and manages an HTML `<canvas>` element, wrapping either a 2D or
  * WebGL rendering context. Instances are handed to helpers such as `Shapes`
- * to perform the actual drawing.
+ * to perform the actual drawing. Also supports adding/removing a CSS
+ * border around the canvas element itself via {@link Canvas#setBorder}/
+ * {@link Canvas#noBorder}, and a small p5.js-style sketch loop via
+ * {@link Canvas#init}/{@link Canvas#frame}/{@link Canvas#frameRate}.
  *
  * @class
  */
@@ -31,13 +39,36 @@ class Canvas {
     #canvas_context;
     #canvas;
     #ctx;
+    // CSS border drawn around the <canvas> element itself, set via
+    // setBorder()/noBorder() - kept separate from #fill_*/#draw_stroke_*
+    // below, which are the *drawing* state (the color shapes/text get
+    // painted with), so the two concepts can never collide.
+    #border_color;
+    #border_width;
+    // Shared drawing state, set via fill()/noFill()/stroke()/noStroke().
+    // Shapes/Text read this (via getFill()/getStroke()) as the default
+    // whenever a draw call doesn't pass its own explicit color - a "pullover"
+    // of the current Canvas setting into whatever draws onto it next.
+    #fill_color;
+    #fill_enabled;
+    #draw_stroke_color;
+    #draw_stroke_width;
+    #draw_stroke_enabled;
+    // requestAnimationFrame lifecycle
+    #target_fps;
+    #current_fps;
+    #frame_interval;
+    #last_frame_time;
+    #last_dispatch_time;
+    #raf_id;
+    #looping;
 
     /**
      * @param {Object} [options={}] - Canvas configuration.
      * @param {string} [options.id='forge-engine'] - `id` attribute applied to the created `<canvas>` element.
      * @param {number} [options.width=800] - Canvas width, in pixels.
      * @param {number} [options.height=600] - Canvas height, in pixels.
-     * @param {string} [options.bg='#000000'] - Background fill color, used only for 2D contexts.
+     * @param {Color|string|number|ArrayLike<number>|Object} [options.bg='#000000'] - Background fill color, used only for 2D contexts.
      * @param {string} [options.ctx='2d'] - Rendering context type to request: `'2d'`, `'webgl'`, or `'webgl2'` (see `Canvas#TWO_D`, `Canvas#WEBGL`, `Canvas#WEBGL2`).
      */
     constructor(options = {}) {
@@ -49,11 +80,35 @@ class Canvas {
         this.#canvas_id = options.id || 'forge-engine';
         this.#canvas_width = options.width || 800;
         this.#canvas_height = options.height || 600;
-        this.#canvas_bg = options.bg || '#000000';
+        this.#canvas_bg = Color.color(options.bg ?? '#000000');
         this.#canvas_context = options.ctx || this.TWO_D;
         // canvas
         this.#canvas = null;
         this.#ctx = null;
+        // border (a CSS border drawn around the <canvas> element itself,
+        // set via setBorder()/noBorder() below - not to be confused with
+        // stroking shapes/text drawn *onto* the canvas, which is #draw_stroke_*
+        // further below)
+        this.#border_color = null;
+        this.#border_width = 0;
+        // shared drawing state - defaults mirror the '#ffffff' fill /
+        // no-stroke defaults Shapes/Text used to hardcode individually
+        this.#fill_color = Color.color('#ffffff');
+        this.#fill_enabled = true;
+        this.#draw_stroke_color = Color.color('#000000');
+        this.#draw_stroke_width = 1;
+        this.#draw_stroke_enabled = false;
+        // requestAnimationFrame lifecycle - defaults to 60fps until
+        // frameRate() is called with a different value. #current_fps starts
+        // out equal to the target and is then updated with the actually
+        // measured rate each time frame() fires.
+        this.#target_fps = 60;
+        this.#current_fps = 60;
+        this.#frame_interval = 1000 / 60;
+        this.#last_frame_time = 0;
+        this.#last_dispatch_time = 0;
+        this.#raf_id = null;
+        this.#looping = false;
     }
 
     /**
@@ -86,14 +141,138 @@ class Canvas {
             // Set the canvas background color by default (2D only - a WebGL
             // context doesn't have fillStyle/fillRect, it's cleared via
             // Shapes#clear() instead).
-            this.#ctx.fillStyle = this.#canvas_bg;
+            this.#ctx.fillStyle = cssColor(this.#canvas_bg);
             this.#ctx.fillRect(0, 0, this.#canvas_width, this.#canvas_height);
         } else {
             this.#ctx.viewport(0, 0, this.#canvas_width, this.#canvas_height);
         }
 
+        if (this.#border_color) {
+            this.#canvas.style.border = `${this.#border_width}px solid ${cssColor(this.#border_color)}`;
+        }
+
         document.body.appendChild(this.#canvas);
         return this;
+    }
+
+    /**
+     * Adds (or updates) a CSS border drawn around the `<canvas>` element
+     * itself - a visible frame/outline for the canvas, distinct from
+     * stroking individual shapes or text drawn *onto* it (see
+     * {@link Canvas#stroke} for that). Safe to call before `create()`; the
+     * border is applied as soon as the element exists (immediately, if it
+     * already does).
+     *
+     * Named `setBorder`/`noBorder` (rather than `stroke`/`noStroke`) so it
+     * can't collide with the shape/text drawing-state methods below.
+     *
+     * @param {Color|string|number|ArrayLike<number>|Object} color - Border color accepted by {@link Color.color}.
+     * @param {number} [width=2] - Border width, in pixels.
+     * @returns {Canvas} This instance, to allow chaining.
+     */
+    setBorder(color, width = 2) {
+        this.#border_color = Color.color(color);
+        this.#border_width = width;
+        if (this.#canvas) {
+            this.#canvas.style.border = `${this.#border_width}px solid ${cssColor(this.#border_color)}`;
+        }
+        return this;
+    }
+
+    /**
+     * Removes a border previously set with {@link Canvas#setBorder}.
+     *
+     * @returns {Canvas} This instance, to allow chaining.
+     */
+    noBorder() {
+        this.#border_color = null;
+        this.#border_width = 0;
+        if (this.#canvas) {
+            this.#canvas.style.border = 'none';
+        }
+        return this;
+    }
+
+    // ---------------------------------------------------------------
+    // Shared drawing state - fill()/noFill()/stroke()/noStroke()
+    // ---------------------------------------------------------------
+    // These don't draw anything themselves. They set the *current* fill and
+    // stroke settings on this Canvas instance, which helpers built on top of
+    // it (Shapes, Text) read back via getFill()/getStroke() and fall back to
+    // whenever a draw call is made without its own explicit color - so
+    // calling canvas.fill('red') "pulls over" into the next circle/rect/text
+    // drawn on that canvas, without needing to pass a color to every call.
+
+    /**
+     * Sets the current fill color and enables filling. Shapes/text drawn
+     * afterward without an explicit color of their own will use this color.
+     *
+     * @param {Color|string|number|ArrayLike<number>|Object} color - Fill color accepted by {@link Color.color}.
+     * @returns {Canvas} This instance, to allow chaining.
+     */
+    fill(color) {
+        this.#fill_color = Color.color(color);
+        this.#fill_enabled = true;
+        return this;
+    }
+
+    /**
+     * Disables filling for subsequent shapes/text that don't pass their own
+     * explicit color, until {@link Canvas#fill} is called again.
+     *
+     * @returns {Canvas} This instance, to allow chaining.
+     */
+    noFill() {
+        this.#fill_enabled = false;
+        return this;
+    }
+
+    /**
+     * Sets the current stroke color/width and enables stroking. Shapes drawn
+     * afterward without their own explicit stroke will use these settings.
+     *
+     * @param {Color|string|number|ArrayLike<number>|Object} color - Stroke color accepted by {@link Color.color}.
+     * @param {number} [width=1] - Stroke width, in pixels.
+     * @returns {Canvas} This instance, to allow chaining.
+     */
+    stroke(color, width = 1) {
+        this.#draw_stroke_color = Color.color(color);
+        this.#draw_stroke_width = width;
+        this.#draw_stroke_enabled = true;
+        return this;
+    }
+
+    /**
+     * Disables stroking for subsequent shapes that don't pass their own
+     * explicit stroke, until {@link Canvas#stroke} is called again.
+     *
+     * @returns {Canvas} This instance, to allow chaining.
+     */
+    noStroke() {
+        this.#draw_stroke_enabled = false;
+        return this;
+    }
+
+    /**
+     * Returns the current fill color, for helpers (Shapes, Text) to fall
+     * back to when a draw call doesn't specify its own.
+     *
+     * @returns {?Color} The current fill color, or `null` if filling is disabled (via {@link Canvas#noFill}).
+     */
+    getFill() {
+        return this.#fill_enabled ? this.#fill_color : null;
+    }
+
+    /**
+     * Returns the current stroke color/width, for helpers (Shapes, Text) to
+     * fall back to when a draw call doesn't specify its own.
+     *
+     * @returns {?{color: Color, width: number}} The current stroke settings, or `null` if stroking is disabled (the default, until {@link Canvas#stroke} is called).
+     */
+    getStroke() {
+        return this.#draw_stroke_enabled
+            ? { color: this.#draw_stroke_color, width: this.#draw_stroke_width }
+            : null;
     }
 
     /**
@@ -140,6 +319,109 @@ class Canvas {
      */
     contextType() {
         return this.#canvas_context;
+    }
+
+    /**
+     * Runs the page's global `init()` function (if one is defined) once the
+     * page has finished loading, then starts the animation loop that drives
+     * {@link Canvas#frame}. Safe to call at any point in page load - it
+     * waits for the `load` event if the page isn't ready yet, and runs
+     * immediately if it already is.
+     *
+     * @returns {Canvas} This instance, to allow chaining.
+     */
+    init() {
+        if (typeof document === 'undefined') return this;
+
+        const start = () => {
+            if (typeof window !== 'undefined' && typeof window.init === 'function') {
+                window.init();
+            }
+            this.frame();
+        };
+
+        if (document.readyState === 'complete') {
+            start();
+        } else {
+            window.addEventListener('load', start);
+        }
+        return this;
+    }
+
+    /**
+     * Starts the `requestAnimationFrame` loop that calls the page's global
+     * `frame()` function on every tick, throttled to the current {@link
+     * Canvas#frameRate}. Already-running loops are left alone (calling this
+     * more than once doesn't stack up multiple loops). Called automatically
+     * by {@link Canvas#init}, but can also be called directly if you don't
+     * need the page-load `init()` hook.
+     *
+     * @returns {Canvas} This instance, to allow chaining.
+     */
+    frame() {
+        if (this.#looping || typeof requestAnimationFrame === 'undefined') return this;
+        this.#looping = true;
+        this.#last_frame_time = performance.now();
+        this.#last_dispatch_time = this.#last_frame_time;
+
+        const tick = (now) => {
+            this.#raf_id = requestAnimationFrame(tick);
+
+            const elapsed = now - this.#last_frame_time;
+            if (elapsed < this.#frame_interval) return;
+            // Measure the actual, real-world gap since the last dispatch for
+            // #current_fps - kept separate from #last_frame_time below,
+            // which is intentionally phase-corrected (snapped to the
+            // frameRate() grid) for throttling, and would otherwise skew the
+            // measured rate.
+            this.#current_fps = 1000 / (now - this.#last_dispatch_time);
+            this.#last_dispatch_time = now;
+            // Subtract the remainder (rather than resetting to `now`) so the
+            // average call rate tracks frameRate() even if a tick runs late.
+            this.#last_frame_time = now - (elapsed % this.#frame_interval);
+
+            if (typeof window !== 'undefined' && typeof window.frame === 'function') {
+                window.frame();
+            }
+        };
+        this.#raf_id = requestAnimationFrame(tick);
+        return this;
+    }
+
+    /**
+     * Stops the loop started by {@link Canvas#frame}/{@link Canvas#init}.
+     * Call {@link Canvas#frame} again (or {@link Canvas#init}, on the next
+     * page load) to resume it.
+     *
+     * @returns {Canvas} This instance, to allow chaining.
+     */
+    noLoop() {
+        if (this.#raf_id !== null && typeof cancelAnimationFrame !== 'undefined') {
+            cancelAnimationFrame(this.#raf_id);
+        }
+        this.#raf_id = null;
+        this.#looping = false;
+        return this;
+    }
+
+    /**
+     * Gets the actual, currently-measured frame rate, or sets the target
+     * frame rate used to throttle {@link Canvas#frame}. Defaults to `60`
+     * until the loop has run - once {@link Canvas#frame} is ticking, calling
+     * this with no arguments returns the real elapsed-time-based rate
+     * (which may run a little above or below the target depending on how
+     * the browser is actually scheduling frames), not just the configured
+     * target. Call with a number to change the target (takes effect on the
+     * next tick, whether or not the loop is currently running).
+     *
+     * @param {number} [fps] - Target frames per second to set. Omit to read the current, actually-measured rate instead.
+     * @returns {Canvas|number} This instance (for chaining) when setting a new target rate, or the current measured frame rate (a number) when called with no arguments.
+     */
+    frameRate(fps) {
+        if (fps === undefined) return this.#current_fps;
+        this.#target_fps = fps;
+        this.#frame_interval = 1000 / fps;
+        return this;
     }
 }
 

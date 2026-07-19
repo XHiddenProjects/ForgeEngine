@@ -92,16 +92,15 @@ class Shapes {
      * @param {number} x - Center X coordinate, in canvas pixels.
      * @param {number} y - Center Y coordinate, in canvas pixels.
      * @param {number} radius - Circle radius, in pixels.
-     * @param {string} [color='#ffffff'] - Fill color (any valid CSS color string).
+     * @param {string} [color] - Fill color (any valid CSS color string). Defaults to the canvas's current {@link Canvas#fill} setting.
      * @returns {Shapes} This instance, to allow chaining.
      * @throws {Error} If the canvas was not created with a `'2d'` context.
      */
-    circle(x, y, radius, color = '#ffffff') {
+    circle(x, y, radius, color) {
         this._require2D('circle');
         this.ctx.beginPath();
         this.ctx.arc(x, y, radius, 0, Math.PI * 2);
-        this.ctx.fillStyle = color;
-        this.ctx.fill();
+        this._applyFillAndStroke(color);
         return this;
     }
 
@@ -112,14 +111,15 @@ class Shapes {
      * @param {number} y - Y coordinate of the top-left corner, in canvas pixels.
      * @param {number} width - Rectangle width, in pixels.
      * @param {number} height - Rectangle height, in pixels.
-     * @param {string} [color='#ffffff'] - Fill color (any valid CSS color string).
+     * @param {string} [color] - Fill color (any valid CSS color string). Defaults to the canvas's current {@link Canvas#fill} setting.
      * @returns {Shapes} This instance, to allow chaining.
      * @throws {Error} If the canvas was not created with a `'2d'` context.
      */
-    rect(x, y, width, height, color = '#ffffff') {
+    rect(x, y, width, height, color) {
         this._require2D('rect');
-        this.ctx.fillStyle = color;
-        this.ctx.fillRect(x, y, width, height);
+        this.ctx.beginPath();
+        this.ctx.rect(x, y, width, height);
+        this._applyFillAndStroke(color);
         return this;
     }
 
@@ -130,18 +130,19 @@ class Shapes {
      * @param {number} y1 - Start point Y coordinate.
      * @param {number} x2 - End point X coordinate.
      * @param {number} y2 - End point Y coordinate.
-     * @param {string} [color='#ffffff'] - Stroke color (any valid CSS color string).
-     * @param {number} [lineWidth=1] - Stroke width, in pixels.
+     * @param {string} [color] - Stroke color (any valid CSS color string). Defaults to the canvas's current {@link Canvas#stroke} color, or `'#ffffff'` if none is set.
+     * @param {number} [lineWidth] - Stroke width, in pixels. Defaults to the canvas's current {@link Canvas#stroke} width, or `1` if none is set.
      * @returns {Shapes} This instance, to allow chaining.
      * @throws {Error} If the canvas was not created with a `'2d'` context.
      */
-    line(x1, y1, x2, y2, color = '#ffffff', lineWidth = 1) {
+    line(x1, y1, x2, y2, color, lineWidth) {
         this._require2D('line');
+        const canvasStroke = this.canvas.getStroke();
         this.ctx.beginPath();
         this.ctx.moveTo(x1, y1);
         this.ctx.lineTo(x2, y2);
-        this.ctx.strokeStyle = color;
-        this.ctx.lineWidth = lineWidth;
+        this.ctx.strokeStyle = color !== undefined ? color : (canvasStroke ? canvasStroke.color : '#ffffff');
+        this.ctx.lineWidth = lineWidth !== undefined ? lineWidth : (canvasStroke ? canvasStroke.width : 1);
         this.ctx.stroke();
         return this;
     }
@@ -155,19 +156,18 @@ class Shapes {
      * @param {number} y2 - Second vertex Y coordinate.
      * @param {number} x3 - Third vertex X coordinate.
      * @param {number} y3 - Third vertex Y coordinate.
-     * @param {string} [color='#ffffff'] - Fill color (any valid CSS color string).
+     * @param {string} [color] - Fill color (any valid CSS color string). Defaults to the canvas's current {@link Canvas#fill} setting.
      * @returns {Shapes} This instance, to allow chaining.
      * @throws {Error} If the canvas was not created with a `'2d'` context.
      */
-    triangle(x1, y1, x2, y2, x3, y3, color = '#ffffff') {
+    triangle(x1, y1, x2, y2, x3, y3, color) {
         this._require2D('triangle');
         this.ctx.beginPath();
         this.ctx.moveTo(x1, y1);
         this.ctx.lineTo(x2, y2);
         this.ctx.lineTo(x3, y3);
         this.ctx.closePath();
-        this.ctx.fillStyle = color;
-        this.ctx.fill();
+        this._applyFillAndStroke(color);
         return this;
     }
 
@@ -263,6 +263,37 @@ class Shapes {
     _require3D(name) {
         if (this.type === '2d') {
             throw new Error(`Shapes#${name}() requires a canvas created with ctx: 'webgl' or 'webgl2'`);
+        }
+    }
+
+    /**
+     * Fills and/or strokes the path already built on `this.ctx` (via a prior
+     * `beginPath()`/path-building calls), using an explicit color when one
+     * is passed, and otherwise falling back to whatever the canvas's shared
+     * drawing state currently says via {@link Canvas#getFill}/{@link
+     * Canvas#getStroke} - this is how `canvas.fill('red')`/`canvas.stroke(...)`
+     * "pull over" into shapes drawn without their own explicit color.
+     * Filling is skipped entirely if the canvas has {@link Canvas#noFill}
+     * in effect and no explicit color was passed; stroking only happens if
+     * the canvas has an active {@link Canvas#stroke}, since shapes have no
+     * stroke arguments of their own.
+     *
+     * @private
+     * @param {string} [explicitColor] - Fill color passed directly to the calling shape method, taking priority over the canvas's current fill setting.
+     * @returns {void}
+     */
+    _applyFillAndStroke(explicitColor) {
+        const fillColor = explicitColor !== undefined ? explicitColor : this.canvas.getFill();
+        if (fillColor) {
+            this.ctx.fillStyle = fillColor;
+            this.ctx.fill();
+        }
+
+        const stroke = this.canvas.getStroke();
+        if (stroke) {
+            this.ctx.strokeStyle = stroke.color;
+            this.ctx.lineWidth = stroke.width;
+            this.ctx.stroke();
         }
     }
 

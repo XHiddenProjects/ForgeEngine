@@ -4,5 +4,6 @@ const Canvas = require('./src/canvas.js');
 const Shapes = require('./src/shapes.js');
 const Transform = require('./src/transform.js');
 const Color = require('./src/color.js');
+const Text = require('./src/text.js');
 
-module.exports = { Canvas, Shapes, Transform, Color};
+module.exports = { Canvas, Shapes, Transform, Color, Text};
