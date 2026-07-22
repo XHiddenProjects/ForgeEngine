@@ -1,5 +1,5 @@
 {
-    "name":"@forgeEngine/3d",
+    "name":"@ForgeEngine/3d",
     "version":"1.0.0",
     "main":"index.js",
     "description":"Forge Engines 2D development packages",

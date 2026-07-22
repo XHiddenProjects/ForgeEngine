@@ -1,17 +1,15 @@
 {
-    "name": "ForgeEngine",
-    "description": "ForgeEngine is a open-source web based game development engine",
-    "version": "1.0.0",
-    "main": "index.js",
-    "license": "MIT",
-    "scripts": {
-        "start": "concurrently \"node server.js\" \"node index.js\""
-    },
-    "dependencies": {
-        "express": "^4.19.2",
-        "open": "^10.1.0"
-    },
-    "devDependencies": {
-        "concurrently": "^10.0.3"
-    }
+  "name": "ForgeEngine",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local ForgeEngine game dashboard and editor",
+  "main": "core/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node core/index.js",
+    "dev": "node --watch core/index.js"
+  },
+  "engines": { "node": ">=18" },
+  "workspaces": ["core", "utils", "2d", "3d"],
+  "dependencies": { "express": "^5.1.0" }
 }

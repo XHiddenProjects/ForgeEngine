@@ -6,7 +6,8 @@
  * The Color class exposes only these methods:
  * alpha, blue, brightness, color, contrast, green, hue, lerpColor,
  * lightness, paletteLerp, red, saturation, setAlpha, setBlue, setGreen,
- * setRed, and toString.
+ * setRed, and toString. It also provides immutable predefined colors through
+ * getters such as Color.RED, Color.GREEN, Color.BLUE, and Color.TRANSPARENT.
  *
  * All methods are static so they remain grouped under Color.
  * RGB/alpha channels use 0-255, hue uses 0-360, and
@@ -60,9 +61,61 @@
         );
     };
 
+    // CSS named-color fallback for non-browser environments. Browsers use
+    // CanvasRenderingContext2D below, which supports the complete CSS color set.
+    const NAMED_COLORS = Object.freeze({
+        transparent: [0, 0, 0, 0],
+        black: [0, 0, 0], silver: [192, 192, 192], gray: [128, 128, 128],
+        white: [255, 255, 255], maroon: [128, 0, 0], red: [255, 0, 0],
+        purple: [128, 0, 128], fuchsia: [255, 0, 255], green: [0, 128, 0],
+        lime: [0, 255, 0], olive: [128, 128, 0], yellow: [255, 255, 0],
+        navy: [0, 0, 128], blue: [0, 0, 255], teal: [0, 128, 128],
+        aqua: [0, 255, 255], orange: [255, 165, 0]
+    });
+
+    const parseCssString = value => {
+        const input = value.trim();
+        if (!input) throw new TypeError("Color string cannot be empty.");
+
+        // Preserve all existing hexadecimal forms.
+        if (/^#?[0-9a-f]{3,4}$/i.test(input)
+            || /^#?[0-9a-f]{6}([0-9a-f]{2})?$/i.test(input)) {
+            return parseHex(input);
+        }
+
+        const named = NAMED_COLORS[input.toLowerCase()];
+        if (named) return makeColor(named[0], named[1], named[2], named[3] ?? 255);
+
+        // Let the browser resolve any other valid CSS color name. Setting an
+        // invalid value leaves fillStyle unchanged, so the sentinel detects it.
+        if (typeof document !== "undefined") {
+            const context = document.createElement("canvas").getContext("2d");
+            if (context) {
+                context.fillStyle = "#010203";
+                context.fillStyle = input;
+                const resolved = context.fillStyle;
+                if (resolved !== "#010203") {
+                    if (resolved.startsWith("#")) return parseHex(resolved);
+                    const match = resolved.match(
+                        /^rgba?\(\s*([\d.]+)[, ]+([\d.]+)[, ]+([\d.]+)(?:[, /]+([\d.]+%?))?\s*\)$/i
+                    );
+                    if (match) {
+                        const alpha = match[4] === undefined ? 255
+                            : match[4].endsWith("%")
+                                ? parseFloat(match[4]) * 2.55
+                                : parseFloat(match[4]) * 255;
+                        return makeColor(match[1], match[2], match[3], alpha);
+                    }
+                }
+            }
+        }
+
+        throw new TypeError(`Invalid color string: ${value}`);
+    };
+
     const parseColor = value => {
         if (value instanceof Color) return value;
-        if (typeof value === "string") return parseHex(value);
+        if (typeof value === "string") return parseCssString(value);
 
         if (Array.isArray(value) || ArrayBuffer.isView(value)) {
             return makeColor(
@@ -436,6 +489,100 @@
 
             const normalizedAlpha = Number((current.a / 255).toFixed(3));
             return `rgba(${current.r}, ${current.g}, ${current.b}, ${normalizedAlpha})`;
+        }
+
+
+        /**
+         * Gets a fully transparent black color.
+         *
+         * A new immutable Color instance is returned on every access, preventing
+         * shared default colors from being modified by consumers.
+         *
+         * @returns {Color} Transparent black with RGBA channels `(0, 0, 0, 0)`.
+         */
+        static get TRANSPARENT() {
+            return makeColor(0, 0, 0, 0);
+        }
+
+        /**
+         * Gets the predefined black color.
+         *
+         * @returns {Color} Black with RGB channels `(0, 0, 0)`.
+         */
+        static get BLACK() {
+            return makeColor(0, 0, 0);
+        }
+
+        /**
+         * Gets the predefined white color.
+         *
+         * @returns {Color} White with RGB channels `(255, 255, 255)`.
+         */
+        static get WHITE() {
+            return makeColor(255, 255, 255);
+        }
+
+        /**
+         * Gets the predefined red color.
+         *
+         * @returns {Color} Red with RGB channels `(255, 0, 0)`.
+         */
+        static get RED() {
+            return makeColor(255, 0, 0);
+        }
+
+        /**
+         * Gets the predefined green color.
+         *
+         * @returns {Color} Green with RGB channels `(0, 255, 0)`.
+         */
+        static get GREEN() {
+            return makeColor(0, 255, 0);
+        }
+
+        /**
+         * Gets the predefined blue color.
+         *
+         * @returns {Color} Blue with RGB channels `(0, 0, 255)`.
+         */
+        static get BLUE() {
+            return makeColor(0, 0, 255);
+        }
+
+        /**
+         * Gets the predefined yellow color.
+         *
+         * @returns {Color} Yellow with RGB channels `(255, 255, 0)`.
+         */
+        static get YELLOW() {
+            return makeColor(255, 255, 0);
+        }
+
+        /**
+         * Gets the predefined cyan color.
+         *
+         * @returns {Color} Cyan with RGB channels `(0, 255, 255)`.
+         */
+        static get CYAN() {
+            return makeColor(0, 255, 255);
+        }
+
+        /**
+         * Gets the predefined magenta color.
+         *
+         * @returns {Color} Magenta with RGB channels `(255, 0, 255)`.
+         */
+        static get MAGENTA() {
+            return makeColor(255, 0, 255);
+        }
+
+        /**
+         * Gets the predefined gray color.
+         *
+         * @returns {Color} Gray with RGB channels `(128, 128, 128)`.
+         */
+        static get GRAY() {
+            return makeColor(128, 128, 128);
         }
     }
 

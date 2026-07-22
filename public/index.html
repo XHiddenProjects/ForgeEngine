@@ -1,21 +1,176 @@
 <!DOCTYPE html>
-<html>
-    <head>
-        <title>ForgeEngine</title>
-        <meta charset="utf-8"/>
-        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"/>
-        <meta name="description" content="Forge is a free and open-source game development browser all in NodeJS"/>
-        <link rel="stylesheet" href="/assets/css/ForgeEngine.css"/>
-    </head>
-    <body>
-        <div class="forge-engine-dashboard">
+<html lang="en" data-forge-theme="dark">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="description" content="ForgeEngine dashboard for creating and managing browser games.">
+    <meta name="theme-color" content="#080d19">
+    <title>ForgeEngine Dashboard</title>
+    <link rel="stylesheet" href="/assets/css/dashboard.css">
+</head>
+<body>
+    <div class="forge-auth" id="authScreen" hidden>
+        <div class="forge-auth__panel">
+            <a class="forge-brand forge-auth__brand" href="/" aria-label="ForgeEngine">
+                <span class="forge-brand__mark" aria-hidden="true">F</span>
+                <span class="forge-brand__text">ForgeEngine</span>
+            </a>
 
+            <form class="forge-auth__form" id="createAccountForm">
+                <div>
+                    <p class="forge-eyebrow">Welcome</p>
+                    <h1>Create your account</h1>
+                    <p class="forge-auth__lede">This workspace doesn't have an account yet. Set one up to start building — everything is saved on this device only.</p>
+                </div>
+                <label class="forge-field">Display name
+                    <input id="createDisplayName" name="displayName" required maxlength="40" autocomplete="name" placeholder="Your name">
+                </label>
+                <label class="forge-field">Password
+                    <input id="createPassword" name="password" type="password" required minlength="8" autocomplete="new-password" placeholder="At least 8 characters">
+                </label>
+                <label class="forge-field">Confirm password
+                    <input id="createPasswordConfirm" name="passwordConfirm" type="password" required minlength="8" autocomplete="new-password" placeholder="Re-enter your password">
+                </label>
+                <p class="forge-form-error" id="createAccountError" role="alert"></p>
+                <button class="forge-button forge-button--primary forge-auth__submit" type="submit">Create account</button>
+            </form>
+
+            <form class="forge-auth__form" id="loginForm" hidden>
+                <div>
+                    <p class="forge-eyebrow">Welcome back</p>
+                    <h1 id="loginTitle">Log in</h1>
+                    <p class="forge-auth__lede">Your session ended, so sign back in to reopen your workspace.</p>
+                </div>
+                <label class="forge-field">Password
+                    <input id="loginPassword" name="password" type="password" required autocomplete="current-password" placeholder="Your password">
+                </label>
+                <p class="forge-form-error" id="loginError" role="alert"></p>
+                <button class="forge-button forge-button--primary forge-auth__submit" type="submit">Log in</button>
+            </form>
         </div>
-        <script src="/utils/transform.js"></script>
-        <script src="/utils/color.js"></script>
-        <script src="/utils/canvas.js"></script>
-        <script src="/utils/shapes.js"></script>   
-        <script src="/utils/text.js"></script>
-        <script src="/assets/js/ForgeEngine.js"></script>
-    </body>
+    </div>
+
+    <div class="forge-dashboard" id="app" hidden>
+        <aside class="forge-sidebar" id="sidebar" aria-label="Primary navigation">
+            <a class="forge-brand" href="/" aria-label="ForgeEngine dashboard">
+                <span class="forge-brand__mark" aria-hidden="true">F</span>
+                <span class="forge-brand__text">ForgeEngine</span>
+            </a>
+
+            <nav class="forge-nav">
+                <a class="forge-nav__item is-active" href="#projects" aria-current="page">
+                    <span aria-hidden="true">◫</span><span>Projects</span>
+                </a>
+                <a class="forge-nav__item" href="#templates">
+                    <span aria-hidden="true">◇</span><span>Templates</span>
+                </a>
+                <a class="forge-nav__item" href="#assets">
+                    <span aria-hidden="true">▦</span><span>Asset Library</span>
+                </a>
+                <a class="forge-nav__item" href="#settings">
+                    <span aria-hidden="true">⚙</span><span>Settings</span>
+                </a>
+            </nav>
+
+            <div class="forge-sidebar__footer">
+                <div class="forge-storage" aria-label="Storage usage">
+                    <div class="forge-storage__row"><span>Local storage</span><span>24%</span></div>
+                    <div class="forge-progress"><span style="width:24%"></span></div>
+                </div>
+                <button class="forge-profile" type="button" id="logoutButton" title="Log out">
+                    <span class="forge-avatar" aria-hidden="true"></span>
+                    <span class="forge-profile__copy"><strong id="profileName">Developer</strong><small>Local workspace &middot; Log out</small></span>
+                </button>
+            </div>
+        </aside>
+
+        <div class="forge-shell">
+            <header class="forge-topbar">
+                <button class="forge-icon-button forge-menu-button" id="menuButton" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">☰</button>
+                <div class="forge-search">
+                    <span aria-hidden="true">⌕</span>
+                    <input id="projectSearch" type="search" placeholder="Search projects" aria-label="Search projects">
+                    <kbd>/</kbd>
+                </div>
+                <div class="forge-topbar__actions">
+                    <button class="forge-icon-button" type="button" aria-label="Notifications">♢</button>
+                    <button class="forge-button forge-button--primary" type="button" data-create-game>
+                        <span aria-hidden="true">＋</span><span>New game</span>
+                    </button>
+                </div>
+            </header>
+
+            <main class="forge-main">
+                <section class="forge-hero" aria-labelledby="dashboard-title">
+                    <div>
+                        <p class="forge-eyebrow">Workspace</p>
+                        <h1 id="dashboard-title">Build your next game</h1>
+                        <p>Create a project, choose a template, and open it directly in the ForgeEngine editor.</p>
+                    </div>
+                    <button class="forge-button forge-button--primary forge-hero__button" type="button" data-create-game>＋ Create game</button>
+                </section>
+
+                <section class="forge-stats" aria-label="Project statistics">
+                    <article class="forge-stat"><span>Projects</span><strong id="projectCount">0</strong><small>In this browser</small></article>
+                    <article class="forge-stat"><span>Recently edited</span><strong id="recentCount">0</strong><small>Last 7 days</small></article>
+                    <article class="forge-stat"><span>Engine</span><strong>Ready</strong><small>Local development</small></article>
+                </section>
+
+                <section class="forge-section" id="projects" aria-labelledby="projects-title">
+                    <div class="forge-section__header">
+                        <div><p class="forge-eyebrow">Your work</p><h2 id="projects-title">Recent projects</h2></div>
+                        <label class="forge-sort">Sort
+                            <select id="projectSort" aria-label="Sort projects">
+                                <option value="updated">Last updated</option>
+                                <option value="name">Name</option>
+                                <option value="created">Date created</option>
+                            </select>
+                        </label>
+                    </div>
+
+                    <div class="forge-project-grid" id="projectGrid"></div>
+                    <div class="forge-empty" id="emptyState" hidden>
+                        <div class="forge-empty__icon" aria-hidden="true">◇</div>
+                        <h3>No projects found</h3>
+                        <p>Create your first game or change your search.</p>
+                        <button class="forge-button forge-button--primary" type="button" data-create-game>Create a game</button>
+                    </div>
+                </section>
+
+                <section class="forge-section" id="templates" aria-labelledby="templates-title">
+                    <div class="forge-section__header"><div><p class="forge-eyebrow">Quick start</p><h2 id="templates-title">Templates</h2></div></div>
+                    <div class="forge-template-grid">
+                        <button class="forge-template" type="button" data-template="Blank Canvas"><span class="forge-template__art forge-template__art--blank">＋</span><strong>Blank Canvas</strong><small>Start from an empty scene</small></button>
+                        <button class="forge-template" type="button" data-template="2D Platformer"><span class="forge-template__art forge-template__art--platformer">▰</span><strong>2D Platformer</strong><small>Movement, camera, and physics</small></button>
+                        <button class="forge-template" type="button" data-template="Top Down"><span class="forge-template__art forge-template__art--topdown">◆</span><strong>Top Down</strong><small>Exploration-ready scene</small></button>
+                    </div>
+                </section>
+            </main>
+        </div>
+        <button class="forge-scrim" id="scrim" type="button" aria-label="Close navigation" tabindex="-1"></button>
+    </div>
+
+    <dialog class="forge-dialog" id="createDialog" aria-labelledby="create-title">
+        <form class="forge-dialog__panel" id="createForm" method="dialog">
+            <div class="forge-dialog__header">
+                <div><p class="forge-eyebrow">New project</p><h2 id="create-title">Create a game</h2></div>
+                <button class="forge-icon-button" value="cancel" formnovalidate aria-label="Close dialog">×</button>
+            </div>
+            <label class="forge-field">Game name
+                <input id="gameName" name="gameName" required maxlength="64" autocomplete="off" placeholder="My awesome game">
+            </label>
+            <label class="forge-field">Template
+                <select id="gameTemplate" name="gameTemplate">
+                    <option>Blank Canvas</option><option>2D Platformer</option><option>Top Down</option>
+                </select>
+            </label>
+            <p class="forge-form-error" id="formError" role="alert"></p>
+            <div class="forge-dialog__actions">
+                <button class="forge-button forge-button--secondary" value="cancel" formnovalidate>Cancel</button>
+                <button class="forge-button forge-button--primary" value="default">Create and open editor</button>
+            </div>
+        </form>
+    </dialog>
+    <script src="/assets/js/dashboard.js"></script>
+</body>
 </html>

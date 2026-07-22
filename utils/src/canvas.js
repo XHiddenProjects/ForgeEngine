@@ -54,6 +54,12 @@ class Canvas {
     #draw_stroke_color;
     #draw_stroke_width;
     #draw_stroke_enabled;
+    // Color interpretation, clipping, blending, and erasing state.
+    #color_mode;
+    #color_max;
+    #clip_defining;
+    #erase_active;
+    #previous_composite_operation;
     // requestAnimationFrame lifecycle
     #target_fps;
     #current_fps;
@@ -76,6 +82,25 @@ class Canvas {
         this.TWO_D = '2d';
         this.WEBGL = 'webgl';
         this.WEBGL2 = 'webgl2';
+
+        // Blend-mode constants. Values are intentionally stable public strings,
+        // while blendMode() translates them to the native 2D/WebGL operation.
+        this.BLEND = 'blend';
+        this.ADD = 'add';
+        this.DARKEST = 'darkest';
+        this.LIGHTEST = 'lightest';
+        this.EXCLUSION = 'exclusion';
+        this.MULTIPLY = 'multiply';
+        this.SCREEN = 'screen';
+        this.REPLACE = 'replace';
+        this.REMOVE = 'remove';
+        this.DIFFERENCE = 'difference';
+        this.OVERLAY = 'overlay';
+        this.HARD_LIGHT = 'hard-light';
+        this.SOFT_LIGHT = 'soft-light';
+        this.DODGE = 'dodge';
+        this.BURN = 'burn';
+        this.SUBTRACT = 'subtract';
         // options
         this.#canvas_id = options.id || 'forge-engine';
         this.#canvas_width = options.width || 800;
@@ -98,6 +123,11 @@ class Canvas {
         this.#draw_stroke_color = Color.color('#000000');
         this.#draw_stroke_width = 1;
         this.#draw_stroke_enabled = false;
+        this.#color_mode = 'rgb';
+        this.#color_max = [255, 255, 255, 255];
+        this.#clip_defining = false;
+        this.#erase_active = false;
+        this.#previous_composite_operation = 'source-over';
         // requestAnimationFrame lifecycle - defaults to 60fps until
         // frameRate() is called with a different value. #current_fps starts
         // out equal to the target and is then updated with the actually
@@ -193,6 +223,277 @@ class Canvas {
         return this;
     }
 
+    /**
+     * Sets and immediately paints the canvas background color.
+     *
+     * @param {...*} values - A Color-compatible value or channel values interpreted
+     * according to the current color mode.
+     * @returns {Canvas} This instance, to allow chaining.
+     */
+    background(...values) {
+        const value = this.#resolveColor(values);
+        this.#canvas_bg = value;
+        if (!this.#ctx) return this;
+        if (this.#canvas_context === this.TWO_D) {
+            this.#ctx.save();
+            this.#ctx.setTransform(1, 0, 0, 1, 0, 0);
+            this.#ctx.globalCompositeOperation = 'source-over';
+            this.#ctx.fillStyle = cssColor(value);
+            this.#ctx.fillRect(0, 0, this.#canvas_width, this.#canvas_height);
+            this.#ctx.restore();
+        } else {
+            const r = Color.red(value) / 255;
+            const g = Color.green(value) / 255;
+            const b = Color.blue(value) / 255;
+            const a = Color.alpha(value) / 255;
+            this.#ctx.clearColor(r, g, b, a);
+            this.#ctx.clear(this.#ctx.COLOR_BUFFER_BIT | this.#ctx.DEPTH_BUFFER_BIT);
+        }
+        return this;
+    }
+
+    /**
+     * Starts defining a 2D clipping path.
+     *
+     * Path-building commands issued through the rendering context after this call
+     * contribute to the mask until {@link Canvas#endClip} is called.
+     *
+     * @returns {Canvas} This instance, to allow chaining.
+     * @throws {Error} If the canvas is not using a 2D rendering context.
+     */
+    beginClip() {
+        this.#require2D('beginClip');
+        if (this.#clip_defining) throw new Error('A clipping path is already being defined.');
+        this.#ctx.beginPath();
+        this.#clip_defining = true;
+        return this;
+    }
+
+    /**
+     * Sets the compositing operation used when new pixels are drawn.
+     *
+     * @param {GlobalCompositeOperation|string} mode - A Canvas 2D composite mode,
+     * such as `source-over`, `multiply`, `screen`, `overlay`, or `lighter`.
+     * @returns {Canvas} This instance, to allow chaining.
+     * @throws {TypeError} If the browser rejects the supplied blend mode.
+     */
+    blendMode(mode = this.BLEND) {
+        if (!this.#ctx) {
+            throw new Error('blendMode() requires create() to be called first.');
+        }
+
+        const normalized = String(mode).toLowerCase().replace(/_/g, '-');
+
+        if (this.#canvas_context === this.TWO_D) {
+            if (normalized === this.SUBTRACT) {
+                throw new TypeError('SUBTRACT blend mode is only available in WebGL mode.');
+            }
+
+            const operations = {
+                [this.BLEND]: 'source-over',
+                [this.ADD]: 'lighter',
+                [this.DARKEST]: 'darken',
+                [this.LIGHTEST]: 'lighten',
+                [this.EXCLUSION]: 'exclusion',
+                [this.MULTIPLY]: 'multiply',
+                [this.SCREEN]: 'screen',
+                [this.REPLACE]: 'copy',
+                [this.REMOVE]: 'destination-out',
+                [this.DIFFERENCE]: 'difference',
+                [this.OVERLAY]: 'overlay',
+                [this.HARD_LIGHT]: 'hard-light',
+                [this.SOFT_LIGHT]: 'soft-light',
+                [this.DODGE]: 'color-dodge',
+                [this.BURN]: 'color-burn'
+            };
+            const operation = operations[normalized];
+            if (!operation) throw new TypeError(`Unsupported 2D blend mode: ${mode}`);
+
+            const previous = this.#ctx.globalCompositeOperation;
+            this.#ctx.globalCompositeOperation = operation;
+            if (this.#ctx.globalCompositeOperation !== operation) {
+                this.#ctx.globalCompositeOperation = previous;
+                throw new TypeError(`The browser does not support blend mode: ${mode}`);
+            }
+            return this;
+        }
+
+        // WebGL's fixed-function blending supports the common modes below.
+        // Shader-based modes (DIFFERENCE, OVERLAY, HARD_LIGHT, SOFT_LIGHT,
+        // DODGE, and BURN) remain intentionally 2D-only.
+        if ([this.DIFFERENCE, this.OVERLAY, this.HARD_LIGHT, this.SOFT_LIGHT,
+            this.DODGE, this.BURN].includes(normalized)) {
+            throw new TypeError(`${mode} blend mode is only available in 2D mode.`);
+        }
+
+        const gl = this.#ctx;
+        gl.enable(gl.BLEND);
+        gl.blendEquation(gl.FUNC_ADD);
+
+        switch (normalized) {
+            case this.BLEND:
+                gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+                break;
+            case this.ADD:
+                gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+                break;
+            case this.DARKEST:
+            case this.LIGHTEST: {
+                const ext = this.#canvas_context === this.WEBGL2
+                    ? null
+                    : gl.getExtension('EXT_blend_minmax');
+                const equation = normalized === this.DARKEST
+                    ? (gl.MIN ?? ext?.MIN_EXT)
+                    : (gl.MAX ?? ext?.MAX_EXT);
+                if (equation === undefined) {
+                    throw new TypeError(`${mode} is not supported by this WebGL context.`);
+                }
+                gl.blendEquation(equation);
+                gl.blendFunc(gl.ONE, gl.ONE);
+                break;
+            }
+            case this.EXCLUSION:
+                gl.blendFunc(gl.ONE_MINUS_DST_COLOR, gl.ONE_MINUS_SRC_COLOR);
+                break;
+            case this.MULTIPLY:
+                gl.blendFunc(gl.DST_COLOR, gl.ZERO);
+                break;
+            case this.SCREEN:
+                gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_COLOR);
+                break;
+            case this.REPLACE:
+                gl.blendFunc(gl.ONE, gl.ZERO);
+                break;
+            case this.REMOVE:
+                gl.blendFunc(gl.ZERO, gl.ONE_MINUS_SRC_ALPHA);
+                break;
+            case this.SUBTRACT:
+                gl.blendEquation(gl.FUNC_REVERSE_SUBTRACT);
+                gl.blendFunc(gl.ONE, gl.ONE);
+                break;
+            default:
+                throw new TypeError(`Unsupported WebGL blend mode: ${mode}`);
+        }
+        return this;
+    }
+
+    /**
+     * Clears every pixel on the canvas to transparent black.
+     *
+     * @returns {Canvas} This instance, to allow chaining.
+     */
+    clear() {
+        if (!this.#ctx) return this;
+        if (this.#canvas_context === this.TWO_D) {
+            this.#ctx.save();
+            this.#ctx.setTransform(1, 0, 0, 1, 0, 0);
+            this.#ctx.clearRect(0, 0, this.#canvas_width, this.#canvas_height);
+            this.#ctx.restore();
+        } else {
+            this.#ctx.clearColor(0, 0, 0, 0);
+            this.#ctx.clear(this.#ctx.COLOR_BUFFER_BIT | this.#ctx.DEPTH_BUFFER_BIT);
+        }
+        return this;
+    }
+
+    /**
+     * Defines and applies a 2D clipping mask.
+     *
+     * When a callback is supplied, it receives the 2D context and should add the
+     * desired geometry to the current path. Without a callback, the current path
+     * is clipped immediately.
+     *
+     * @param {function(CanvasRenderingContext2D):void} [definePath] - Optional path builder.
+     * @param {CanvasFillRule} [fillRule='nonzero'] - The rule used to determine the mask interior.
+     * @returns {Canvas} This instance, to allow chaining.
+     */
+    clip(definePath, fillRule = 'nonzero') {
+        this.#require2D('clip');
+        if (typeof definePath === 'function') {
+            this.#ctx.beginPath();
+            definePath(this.#ctx);
+        } else if (typeof definePath === 'string') {
+            fillRule = definePath;
+        }
+        this.#ctx.clip(fillRule);
+        return this;
+    }
+
+    /**
+     * Changes how numeric channel values passed to {@link Canvas#fill},
+     * {@link Canvas#stroke}, and {@link Canvas#background} are interpreted.
+     *
+     * @param {'rgb'|'hsl'|'hsb'|'hsv'} mode - The color model to use.
+     * @param {...number} maxima - Optional channel maxima. Supply one value for all
+     * channels, three for color channels, or four including alpha.
+     * @returns {Canvas} This instance, to allow chaining.
+     */
+    colorMode(mode, ...maxima) {
+        const normalized = String(mode).toLowerCase();
+        if (!['rgb', 'hsl', 'hsb', 'hsv'].includes(normalized)) {
+            throw new TypeError(`Unsupported color mode: ${mode}`);
+        }
+        this.#color_mode = normalized === 'hsv' ? 'hsb' : normalized;
+        if (maxima.length) {
+            const values = maxima.length === 1
+                ? [maxima[0], maxima[0], maxima[0], maxima[0]]
+                : [maxima[0], maxima[1], maxima[2], maxima[3] ?? this.#color_max[3]];
+            if (values.some(value => !Number.isFinite(value) || value <= 0)) {
+                throw new TypeError('Color-mode maxima must be positive finite numbers.');
+            }
+            this.#color_max = values;
+        } else {
+            this.#color_max = this.#color_mode === 'rgb'
+                ? [255, 255, 255, 255]
+                : [360, 100, 100, 255];
+        }
+        return this;
+    }
+
+    /**
+     * Applies the clipping mask started by {@link Canvas#beginClip}.
+     *
+     * @param {CanvasFillRule} [fillRule='nonzero'] - The clipping fill rule.
+     * @returns {Canvas} This instance, to allow chaining.
+     */
+    endClip(fillRule = 'nonzero') {
+        this.#require2D('endClip');
+        if (!this.#clip_defining) throw new Error('endClip() requires a matching beginClip().');
+        this.#ctx.clip(fillRule);
+        this.#clip_defining = false;
+        return this;
+    }
+
+    /**
+     * Starts erasing with subsequently drawn shapes by using destination-out
+     * compositing. Call {@link Canvas#noErase} to restore the previous blend mode.
+     *
+     * @returns {Canvas} This instance, to allow chaining.
+     */
+    erase() {
+        this.#require2D('erase');
+        if (!this.#erase_active) {
+            this.#previous_composite_operation = this.#ctx.globalCompositeOperation;
+            this.#ctx.globalCompositeOperation = 'destination-out';
+            this.#erase_active = true;
+        }
+        return this;
+    }
+
+    /**
+     * Ends erasing and restores the blend mode active before {@link Canvas#erase}.
+     *
+     * @returns {Canvas} This instance, to allow chaining.
+     */
+    noErase() {
+        this.#require2D('noErase');
+        if (this.#erase_active) {
+            this.#ctx.globalCompositeOperation = this.#previous_composite_operation;
+            this.#erase_active = false;
+        }
+        return this;
+    }
+
     // ---------------------------------------------------------------
     // Shared drawing state - fill()/noFill()/stroke()/noStroke()
     // ---------------------------------------------------------------
@@ -207,11 +508,11 @@ class Canvas {
      * Sets the current fill color and enables filling. Shapes/text drawn
      * afterward without an explicit color of their own will use this color.
      *
-     * @param {Color|string|number|ArrayLike<number>|Object} color - Fill color accepted by {@link Color.color}.
+     * @param {...*} values - A Color-compatible value or channel values interpreted according to the current color mode.
      * @returns {Canvas} This instance, to allow chaining.
      */
-    fill(color) {
-        this.#fill_color = Color.color(color);
+    fill(...values) {
+        this.#fill_color = this.#resolveColor(values);
         this.#fill_enabled = true;
         return this;
     }
@@ -236,7 +537,7 @@ class Canvas {
      * @returns {Canvas} This instance, to allow chaining.
      */
     stroke(color, width = 1) {
-        this.#draw_stroke_color = Color.color(color);
+        this.#draw_stroke_color = this.#resolveColor([color]);
         this.#draw_stroke_width = width;
         this.#draw_stroke_enabled = true;
         return this;
@@ -260,7 +561,7 @@ class Canvas {
      * @returns {?Color} The current fill color, or `null` if filling is disabled (via {@link Canvas#noFill}).
      */
     getFill() {
-        return this.#fill_enabled ? this.#fill_color : null;
+        return this.#fill_enabled ? Color.toString(this.#fill_color) : null;
     }
 
     /**
@@ -271,7 +572,7 @@ class Canvas {
      */
     getStroke() {
         return this.#draw_stroke_enabled
-            ? { color: this.#draw_stroke_color, width: this.#draw_stroke_width }
+            ? { color: Color.toString(this.#draw_stroke_color), width: this.#draw_stroke_width }
             : null;
     }
 
@@ -280,7 +581,7 @@ class Canvas {
      *
      * @returns {number} Canvas height, in pixels.
      */
-    height() {
+    get HEIGHT() {
         return this.#canvas_height;
     }
 
@@ -289,7 +590,7 @@ class Canvas {
      *
      * @returns {number} Canvas width, in pixels.
      */
-    width() {
+    get WIDTH() {
         // was: returned this.#canvas_height (copy/paste bug)
         return this.#canvas_width;
     }
@@ -402,6 +703,55 @@ class Canvas {
         this.#raf_id = null;
         this.#looping = false;
         return this;
+    }
+
+    #require2D(method) {
+        if (!this.#ctx || this.#canvas_context !== this.TWO_D) {
+            throw new Error(`${method}() requires a created 2D canvas context.`);
+        }
+    }
+
+    #resolveColor(values) {
+        if (values.length === 1 && (typeof values[0] !== 'number' || this.#color_mode === 'rgb')) {
+            return Color.color(values[0]);
+        }
+        if (values.length < 3) return Color.color(...values);
+
+        const [first, second, third, alpha = this.#color_max[3]] = values.map(Number);
+        const normalizedAlpha = alpha / this.#color_max[3] * 255;
+        if (this.#color_mode === 'rgb') {
+            return Color.color(
+                first / this.#color_max[0] * 255,
+                second / this.#color_max[1] * 255,
+                third / this.#color_max[2] * 255,
+                normalizedAlpha
+            );
+        }
+
+        const h = ((first / this.#color_max[0]) % 1 + 1) % 1;
+        const s = Math.min(1, Math.max(0, second / this.#color_max[1]));
+        const component = Math.min(1, Math.max(0, third / this.#color_max[2]));
+        let r, g, b;
+        if (this.#color_mode === 'hsl') {
+            const chroma = (1 - Math.abs(2 * component - 1)) * s;
+            [r, g, b] = this.#hueToRgb(h, chroma, component - chroma / 2);
+        } else {
+            const chroma = component * s;
+            [r, g, b] = this.#hueToRgb(h, chroma, component - chroma);
+        }
+        return Color.color(r * 255, g * 255, b * 255, normalizedAlpha);
+    }
+
+    #hueToRgb(hue, chroma, match) {
+        const section = hue * 6;
+        const x = chroma * (1 - Math.abs((section % 2) - 1));
+        const values = section < 1 ? [chroma, x, 0]
+            : section < 2 ? [x, chroma, 0]
+            : section < 3 ? [0, chroma, x]
+            : section < 4 ? [0, x, chroma]
+            : section < 5 ? [x, 0, chroma]
+            : [chroma, 0, x];
+        return values.map(value => value + match);
     }
 
     /**

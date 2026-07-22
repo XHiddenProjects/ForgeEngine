@@ -1,6 +1,531 @@
 :root,
-:host{
-    /*Dashboard*/
-    --forge-engine-dashboard-bg: #fefefe;
-    
+:host {
+    /* =========================================================
+       FORGE ENGINE DESIGN TOKENS
+       ========================================================= */
+
+    /* ---------------------------------------------------------
+       Color primitives
+       Components should generally use semantic colors below
+       instead of referencing these primitives directly.
+       --------------------------------------------------------- */
+
+    --forge-color-white: #ffffff;
+    --forge-color-black: #000000;
+
+    --forge-gray-50: #f8fafc;
+    --forge-gray-100: #f1f5f9;
+    --forge-gray-200: #e2e8f0;
+    --forge-gray-300: #cbd5e1;
+    --forge-gray-400: #94a3b8;
+    --forge-gray-500: #64748b;
+    --forge-gray-600: #475569;
+    --forge-gray-700: #334155;
+    --forge-gray-800: #1e293b;
+    --forge-gray-850: #172033;
+    --forge-gray-900: #0f172a;
+    --forge-gray-950: #080d19;
+
+    --forge-blue-300: #7dd3fc;
+    --forge-blue-400: #38bdf8;
+    --forge-blue-500: #0ea5e9;
+    --forge-blue-600: #0284c7;
+    --forge-blue-700: #0369a1;
+
+    --forge-purple-400: #a78bfa;
+    --forge-purple-500: #8b5cf6;
+    --forge-purple-600: #7c3aed;
+
+    --forge-green-400: #4ade80;
+    --forge-green-500: #22c55e;
+    --forge-green-600: #16a34a;
+
+    --forge-yellow-400: #facc15;
+    --forge-yellow-500: #eab308;
+
+    --forge-orange-400: #fb923c;
+    --forge-orange-500: #f97316;
+
+    --forge-red-400: #f87171;
+    --forge-red-500: #ef4444;
+    --forge-red-600: #dc2626;
+
+    --forge-cyan-400: #22d3ee;
+    --forge-pink-400: #f472b6;
+
+
+    /* ---------------------------------------------------------
+       Typography
+       --------------------------------------------------------- */
+
+    --forge-font-ui:
+        Inter,
+        ui-sans-serif,
+        system-ui,
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        sans-serif;
+
+    --forge-font-heading:
+        Inter,
+        ui-sans-serif,
+        system-ui,
+        sans-serif;
+
+    --forge-font-code:
+        "JetBrains Mono",
+        "Cascadia Code",
+        "SFMono-Regular",
+        Consolas,
+        monospace;
+
+    --forge-font-game:
+        var(--forge-font-ui);
+
+    --forge-font-size-2xs: 0.625rem;
+    --forge-font-size-xs: 0.75rem;
+    --forge-font-size-sm: 0.8125rem;
+    --forge-font-size-md: 0.875rem;
+    --forge-font-size-lg: 1rem;
+    --forge-font-size-xl: 1.125rem;
+    --forge-font-size-2xl: 1.375rem;
+    --forge-font-size-3xl: 1.75rem;
+    --forge-font-size-4xl: 2.25rem;
+
+    --forge-font-weight-regular: 400;
+    --forge-font-weight-medium: 500;
+    --forge-font-weight-semibold: 600;
+    --forge-font-weight-bold: 700;
+
+    --forge-line-height-tight: 1.2;
+    --forge-line-height-normal: 1.5;
+    --forge-line-height-relaxed: 1.7;
+
+    --forge-letter-spacing-tight: -0.02em;
+    --forge-letter-spacing-normal: 0;
+    --forge-letter-spacing-wide: 0.04em;
+
+
+    /* ---------------------------------------------------------
+       Spacing
+       Uses a consistent four-pixel-based scale.
+       --------------------------------------------------------- */
+
+    --forge-space-0: 0;
+    --forge-space-0-5: 0.125rem;
+    --forge-space-1: 0.25rem;
+    --forge-space-1-5: 0.375rem;
+    --forge-space-2: 0.5rem;
+    --forge-space-2-5: 0.625rem;
+    --forge-space-3: 0.75rem;
+    --forge-space-4: 1rem;
+    --forge-space-5: 1.25rem;
+    --forge-space-6: 1.5rem;
+    --forge-space-8: 2rem;
+    --forge-space-10: 2.5rem;
+    --forge-space-12: 3rem;
+    --forge-space-16: 4rem;
+
+
+    /* ---------------------------------------------------------
+       Sizing
+       --------------------------------------------------------- */
+
+    --forge-control-height-xs: 1.5rem;
+    --forge-control-height-sm: 1.75rem;
+    --forge-control-height-md: 2.25rem;
+    --forge-control-height-lg: 2.75rem;
+
+    --forge-icon-size-sm: 0.875rem;
+    --forge-icon-size-md: 1rem;
+    --forge-icon-size-lg: 1.25rem;
+    --forge-icon-size-xl: 1.5rem;
+
+    --forge-sidebar-width: 16rem;
+    --forge-sidebar-width-collapsed: 3.5rem;
+    --forge-inspector-width: 20rem;
+    --forge-toolbar-height: 3rem;
+    --forge-statusbar-height: 1.5rem;
+    --forge-titlebar-height: 2.5rem;
+
+    --forge-content-max-width: 90rem;
+
+
+    /* ---------------------------------------------------------
+       Borders and corners
+       --------------------------------------------------------- */
+
+    --forge-border-width: 1px;
+    --forge-border-width-strong: 2px;
+
+    --forge-radius-none: 0;
+    --forge-radius-xs: 0.1875rem;
+    --forge-radius-sm: 0.25rem;
+    --forge-radius-md: 0.375rem;
+    --forge-radius-lg: 0.5rem;
+    --forge-radius-xl: 0.75rem;
+    --forge-radius-2xl: 1rem;
+    --forge-radius-round: 9999px;
+
+
+    /* ---------------------------------------------------------
+       Elevation and shadows
+       --------------------------------------------------------- */
+
+    --forge-shadow-xs:
+        0 1px 2px rgb(0 0 0 / 0.18);
+
+    --forge-shadow-sm:
+        0 2px 6px rgb(0 0 0 / 0.2);
+
+    --forge-shadow-md:
+        0 8px 20px rgb(0 0 0 / 0.24);
+
+    --forge-shadow-lg:
+        0 16px 40px rgb(0 0 0 / 0.32);
+
+    --forge-shadow-xl:
+        0 24px 64px rgb(0 0 0 / 0.4);
+
+    --forge-shadow-inset:
+        inset 0 1px 0 rgb(255 255 255 / 0.04);
+
+    --forge-shadow-focus:
+        0 0 0 3px rgb(14 165 233 / 0.28);
+
+
+    /* ---------------------------------------------------------
+       Motion
+       --------------------------------------------------------- */
+
+    --forge-duration-instant: 0ms;
+    --forge-duration-fast: 100ms;
+    --forge-duration-normal: 180ms;
+    --forge-duration-slow: 280ms;
+    --forge-duration-panel: 350ms;
+
+    --forge-ease-standard: cubic-bezier(0.2, 0, 0, 1);
+    --forge-ease-emphasized: cubic-bezier(0.2, 0.8, 0.2, 1);
+    --forge-ease-enter: cubic-bezier(0, 0, 0.2, 1);
+    --forge-ease-exit: cubic-bezier(0.4, 0, 1, 1);
+
+
+    /* ---------------------------------------------------------
+       Stacking order
+       --------------------------------------------------------- */
+
+    --forge-z-canvas: 0;
+    --forge-z-content: 10;
+    --forge-z-panel: 100;
+    --forge-z-toolbar: 200;
+    --forge-z-dropdown: 500;
+    --forge-z-sticky: 600;
+    --forge-z-overlay: 800;
+    --forge-z-modal: 900;
+    --forge-z-popover: 950;
+    --forge-z-tooltip: 1000;
+    --forge-z-notification: 1100;
+
+
+    /* =========================================================
+       SEMANTIC DARK THEME
+       ========================================================= */
+
+    --forge-color-brand: var(--forge-blue-500);
+    --forge-color-brand-hover: var(--forge-blue-400);
+    --forge-color-brand-active: var(--forge-blue-600);
+    --forge-color-brand-subtle: rgb(14 165 233 / 0.14);
+    --forge-color-on-brand: var(--forge-color-white);
+
+    --forge-color-accent: var(--forge-purple-500);
+    --forge-color-accent-hover: var(--forge-purple-400);
+    --forge-color-accent-subtle: rgb(139 92 246 / 0.14);
+
+    --forge-color-success: var(--forge-green-500);
+    --forge-color-success-subtle: rgb(34 197 94 / 0.14);
+
+    --forge-color-warning: var(--forge-yellow-400);
+    --forge-color-warning-subtle: rgb(250 204 21 / 0.14);
+
+    --forge-color-danger: var(--forge-red-500);
+    --forge-color-danger-hover: var(--forge-red-400);
+    --forge-color-danger-subtle: rgb(239 68 68 / 0.14);
+
+    --forge-color-info: var(--forge-cyan-400);
+    --forge-color-info-subtle: rgb(34 211 238 / 0.14);
+
+    --forge-bg-app: var(--forge-gray-950);
+    --forge-bg-canvas: #090e18;
+    --forge-bg-surface: var(--forge-gray-900);
+    --forge-bg-surface-raised: var(--forge-gray-850);
+    --forge-bg-surface-overlay: var(--forge-gray-800);
+    --forge-bg-surface-hover: rgb(255 255 255 / 0.055);
+    --forge-bg-surface-active: rgb(255 255 255 / 0.09);
+    --forge-bg-surface-selected: var(--forge-color-brand-subtle);
+    --forge-bg-disabled: rgb(255 255 255 / 0.035);
+    --forge-bg-backdrop: rgb(0 0 0 / 0.65);
+
+    --forge-text-primary: var(--forge-gray-50);
+    --forge-text-secondary: var(--forge-gray-300);
+    --forge-text-muted: var(--forge-gray-400);
+    --forge-text-disabled: var(--forge-gray-600);
+    --forge-text-link: var(--forge-blue-400);
+    --forge-text-inverse: var(--forge-gray-950);
+
+    --forge-border-subtle: rgb(148 163 184 / 0.12);
+    --forge-border-default: rgb(148 163 184 / 0.2);
+    --forge-border-strong: rgb(148 163 184 / 0.36);
+    --forge-border-focus: var(--forge-color-brand);
+    --forge-divider-color: var(--forge-border-subtle);
+
+
+    /* =========================================================
+       DASHBOARD TOKENS
+       ========================================================= */
+
+    --forge-dashboard-bg: var(--forge-bg-app);
+    --forge-dashboard-header-bg: rgb(15 23 42 / 0.94);
+    --forge-dashboard-sidebar-bg: var(--forge-bg-surface);
+    --forge-dashboard-sidebar-border: var(--forge-border-default);
+
+    --forge-dashboard-card-bg: var(--forge-bg-surface);
+    --forge-dashboard-card-border: var(--forge-border-default);
+    --forge-dashboard-card-radius: var(--forge-radius-xl);
+    --forge-dashboard-card-shadow: var(--forge-shadow-sm);
+    --forge-dashboard-card-padding: var(--forge-space-5);
+    --forge-dashboard-card-gap: var(--forge-space-4);
+
+    --forge-dashboard-stat-positive: var(--forge-color-success);
+    --forge-dashboard-stat-negative: var(--forge-color-danger);
+    --forge-dashboard-chart-primary: var(--forge-color-brand);
+    --forge-dashboard-chart-secondary: var(--forge-color-accent);
+    --forge-dashboard-chart-grid: var(--forge-border-subtle);
+
+    --forge-dashboard-nav-bg-hover: var(--forge-bg-surface-hover);
+    --forge-dashboard-nav-bg-active: var(--forge-color-brand-subtle);
+    --forge-dashboard-nav-text: var(--forge-text-secondary);
+    --forge-dashboard-nav-text-active: var(--forge-blue-300);
+    --forge-dashboard-nav-indicator: var(--forge-color-brand);
+
+
+    /* =========================================================
+       EDITOR TOKENS
+       ========================================================= */
+
+    --forge-editor-bg: var(--forge-bg-app);
+    --forge-editor-panel-bg: var(--forge-bg-surface);
+    --forge-editor-panel-header-bg: var(--forge-bg-surface-raised);
+    --forge-editor-panel-border: var(--forge-border-default);
+    --forge-editor-panel-radius: var(--forge-radius-md);
+
+    --forge-editor-toolbar-bg: var(--forge-bg-surface);
+    --forge-editor-toolbar-border: var(--forge-border-default);
+    --forge-editor-statusbar-bg: var(--forge-gray-900);
+    --forge-editor-statusbar-text: var(--forge-text-muted);
+
+    --forge-editor-viewport-bg: #080b12;
+    --forge-editor-viewport-grid-minor: rgb(148 163 184 / 0.08);
+    --forge-editor-viewport-grid-major: rgb(148 163 184 / 0.16);
+    --forge-editor-viewport-axis-x: var(--forge-red-400);
+    --forge-editor-viewport-axis-y: var(--forge-green-400);
+    --forge-editor-viewport-axis-z: var(--forge-blue-400);
+    --forge-editor-viewport-selection: var(--forge-color-brand);
+    --forge-editor-viewport-selection-fill: rgb(14 165 233 / 0.15);
+
+    --forge-editor-hierarchy-indent: 1rem;
+    --forge-editor-hierarchy-row-height: 1.75rem;
+    --forge-editor-hierarchy-hover: var(--forge-bg-surface-hover);
+    --forge-editor-hierarchy-selected: var(--forge-color-brand-subtle);
+
+    --forge-editor-inspector-label-width: 7rem;
+    --forge-editor-inspector-row-gap: var(--forge-space-2);
+    --forge-editor-inspector-section-gap: var(--forge-space-4);
+
+    --forge-editor-resizer-size: 0.25rem;
+    --forge-editor-resizer-color: transparent;
+    --forge-editor-resizer-hover: var(--forge-color-brand);
+
+    --forge-editor-gizmo-x: var(--forge-red-500);
+    --forge-editor-gizmo-y: var(--forge-green-500);
+    --forge-editor-gizmo-z: var(--forge-blue-500);
+    --forge-editor-gizmo-center: var(--forge-yellow-400);
+
+    --forge-editor-code-bg: #070b13;
+    --forge-editor-code-text: #d8dee9;
+    --forge-editor-code-comment: #64748b;
+    --forge-editor-code-keyword: #c084fc;
+    --forge-editor-code-string: #86efac;
+    --forge-editor-code-number: #fbbf24;
+    --forge-editor-code-function: #7dd3fc;
+    --forge-editor-code-variable: #f8fafc;
+    --forge-editor-code-selection: rgb(14 165 233 / 0.25);
+    --forge-editor-code-line-highlight: rgb(255 255 255 / 0.035);
+
+
+    /* =========================================================
+       GAMEPLAY UI TOKENS
+       Variables for HUDs, menus, dialogs, and overlays.
+       ========================================================= */
+
+    --forge-game-ui-scale: 1;
+    --forge-game-safe-area: 1.5rem;
+
+    --forge-game-font-family: var(--forge-font-game);
+    --forge-game-text-color: var(--forge-color-white);
+    --forge-game-text-muted: rgb(255 255 255 / 0.68);
+    --forge-game-text-shadow: 0 2px 4px rgb(0 0 0 / 0.8);
+
+    --forge-game-panel-bg: rgb(8 13 25 / 0.88);
+    --forge-game-panel-bg-solid: var(--forge-gray-950);
+    --forge-game-panel-border: rgb(255 255 255 / 0.15);
+    --forge-game-panel-radius: var(--forge-radius-xl);
+    --forge-game-panel-blur: 14px;
+    --forge-game-panel-padding: var(--forge-space-5);
+
+    --forge-game-hud-bg: rgb(8 13 25 / 0.72);
+    --forge-game-hud-border: rgb(255 255 255 / 0.12);
+    --forge-game-hud-radius: var(--forge-radius-lg);
+
+    --forge-game-health: var(--forge-red-500);
+    --forge-game-health-low: #ff2d55;
+    --forge-game-health-bg: rgb(0 0 0 / 0.5);
+
+    --forge-game-mana: var(--forge-blue-500);
+    --forge-game-stamina: var(--forge-green-500);
+    --forge-game-shield: var(--forge-cyan-400);
+    --forge-game-experience: var(--forge-purple-500);
+    --forge-game-objective: var(--forge-yellow-400);
+
+    --forge-game-friendly: var(--forge-green-400);
+    --forge-game-neutral: var(--forge-yellow-400);
+    --forge-game-hostile: var(--forge-red-400);
+
+    --forge-game-crosshair-color: rgb(255 255 255 / 0.92);
+    --forge-game-crosshair-hit: var(--forge-red-400);
+    --forge-game-crosshair-size: 1.5rem;
+    --forge-game-crosshair-thickness: 2px;
+    --forge-game-crosshair-gap: 0.25rem;
+
+    --forge-game-tooltip-bg: rgb(8 13 25 / 0.96);
+    --forge-game-tooltip-border: var(--forge-border-strong);
+    --forge-game-tooltip-radius: var(--forge-radius-md);
+    --forge-game-tooltip-max-width: 20rem;
+
+    --forge-game-dialog-width: min(34rem, calc(100vw - 2rem));
+    --forge-game-dialog-bg: var(--forge-game-panel-bg);
+    --forge-game-dialog-portrait-size: 5rem;
+
+    --forge-game-minimap-size: 12rem;
+    --forge-game-minimap-bg: rgb(0 0 0 / 0.55);
+    --forge-game-minimap-border: rgb(255 255 255 / 0.2);
+    --forge-game-minimap-player: var(--forge-blue-400);
+    --forge-game-minimap-enemy: var(--forge-red-400);
+    --forge-game-minimap-objective: var(--forge-yellow-400);
+
+    --forge-game-damage-color: var(--forge-red-400);
+    --forge-game-healing-color: var(--forge-green-400);
+    --forge-game-critical-color: var(--forge-yellow-400);
+
+    --forge-game-rarity-common: #cbd5e1;
+    --forge-game-rarity-uncommon: #4ade80;
+    --forge-game-rarity-rare: #38bdf8;
+    --forge-game-rarity-epic: #c084fc;
+    --forge-game-rarity-legendary: #fb923c;
+    --forge-game-rarity-mythic: #f472b6;
+
+
+    /* =========================================================
+       COMPONENT TOKENS
+       ========================================================= */
+
+    /* Buttons */
+
+    --forge-button-height: var(--forge-control-height-md);
+    --forge-button-padding-x: var(--forge-space-3);
+    --forge-button-gap: var(--forge-space-2);
+    --forge-button-radius: var(--forge-radius-md);
+    --forge-button-font-size: var(--forge-font-size-md);
+    --forge-button-font-weight: var(--forge-font-weight-medium);
+
+    --forge-button-primary-bg: var(--forge-color-brand);
+    --forge-button-primary-bg-hover: var(--forge-color-brand-hover);
+    --forge-button-primary-bg-active: var(--forge-color-brand-active);
+    --forge-button-primary-text: var(--forge-color-on-brand);
+
+    --forge-button-secondary-bg: var(--forge-bg-surface-raised);
+    --forge-button-secondary-bg-hover: var(--forge-bg-surface-hover);
+    --forge-button-secondary-border: var(--forge-border-default);
+    --forge-button-secondary-text: var(--forge-text-primary);
+
+    --forge-button-danger-bg: var(--forge-color-danger);
+    --forge-button-danger-bg-hover: var(--forge-color-danger-hover);
+    --forge-button-danger-text: var(--forge-color-white);
+
+    /* Inputs */
+
+    --forge-input-height: var(--forge-control-height-md);
+    --forge-input-bg: var(--forge-gray-950);
+    --forge-input-bg-hover: var(--forge-bg-surface-raised);
+    --forge-input-border: var(--forge-border-default);
+    --forge-input-border-hover: var(--forge-border-strong);
+    --forge-input-border-focus: var(--forge-border-focus);
+    --forge-input-text: var(--forge-text-primary);
+    --forge-input-placeholder: var(--forge-text-muted);
+    --forge-input-radius: var(--forge-radius-md);
+    --forge-input-padding-x: var(--forge-space-3);
+
+    /* Menus */
+
+    --forge-menu-bg: var(--forge-bg-surface-overlay);
+    --forge-menu-border: var(--forge-border-default);
+    --forge-menu-radius: var(--forge-radius-lg);
+    --forge-menu-shadow: var(--forge-shadow-lg);
+    --forge-menu-padding: var(--forge-space-1);
+    --forge-menu-item-height: 2rem;
+    --forge-menu-item-hover: var(--forge-bg-surface-hover);
+    --forge-menu-item-active: var(--forge-color-brand-subtle);
+
+    /* Tabs */
+
+    --forge-tab-height: 2.25rem;
+    --forge-tab-bg: transparent;
+    --forge-tab-bg-hover: var(--forge-bg-surface-hover);
+    --forge-tab-bg-active: var(--forge-bg-surface-raised);
+    --forge-tab-text: var(--forge-text-muted);
+    --forge-tab-text-active: var(--forge-text-primary);
+    --forge-tab-indicator: var(--forge-color-brand);
+
+    /* Scrollbars */
+
+    --forge-scrollbar-size: 0.625rem;
+    --forge-scrollbar-track: transparent;
+    --forge-scrollbar-thumb: rgb(148 163 184 / 0.25);
+    --forge-scrollbar-thumb-hover: rgb(148 163 184 / 0.42);
+
+    /* Tooltips */
+
+    --forge-tooltip-bg: var(--forge-gray-800);
+    --forge-tooltip-text: var(--forge-text-primary);
+    --forge-tooltip-radius: var(--forge-radius-sm);
+    --forge-tooltip-padding-x: var(--forge-space-2);
+    --forge-tooltip-padding-y: var(--forge-space-1);
+    --forge-tooltip-delay: 400ms;
+
+    /* Modals */
+
+    --forge-modal-bg: var(--forge-bg-surface-raised);
+    --forge-modal-border: var(--forge-border-default);
+    --forge-modal-radius: var(--forge-radius-xl);
+    --forge-modal-shadow: var(--forge-shadow-xl);
+    --forge-modal-width: min(36rem, calc(100vw - 2rem));
+    --forge-modal-padding: var(--forge-space-6);
+
+    /* Notifications */
+
+    --forge-toast-bg: var(--forge-bg-surface-overlay);
+    --forge-toast-border: var(--forge-border-default);
+    --forge-toast-radius: var(--forge-radius-lg);
+    --forge-toast-shadow: var(--forge-shadow-lg);
+    --forge-toast-width: 22rem;
 }
