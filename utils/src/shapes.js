@@ -77,9 +77,119 @@ class Shapes {
 
         this._geometryCache = {};
 
+        // Drawing-attribute state (attributes category): where rects/ellipses
+        // are anchored, and how strokes are capped/joined/weighted/smoothed.
+        // Mirrors the "pullover" pattern already used by Canvas#getFill /
+        // Canvas#getStroke - set once, then implicitly applied to shapes
+        // drawn afterwards unless a call overrides it explicitly.
+        this.CORNER = 'corner';
+        this.CENTER = 'center';
+        this.RADIUS = 'radius';
+        this.CORNERS = 'corners';
+        this.ROUND = 'round';
+        this.SQUARE = 'butt';
+        this.PROJECT = 'square';
+        this.MITER = 'miter';
+        this.BEVEL = 'bevel';
+
+        this._rectMode = this.CORNER;
+        this._ellipseMode = this.CENTER;
+        this._strokeWeight = 1;
+        this._strokeCap = this.ROUND;
+        this._strokeJoin = this.MITER;
+        this._smoothing = true;
+
         if (this.type !== '2d') {
             this._initGL();
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Attributes
+    // ---------------------------------------------------------------
+
+    /**
+     * Changes where rectangles (and squares) are drawn relative to the
+     * coordinates passed to {@link Shapes#rect}/{@link Shapes#square}.
+     *
+     * @param {string} mode - One of `this.CORNER` (default), `this.CENTER`, `this.RADIUS`, or `this.CORNERS`.
+     * @returns {Shapes} This instance, to allow chaining.
+     */
+    rectMode(mode) {
+        this._rectMode = mode;
+        return this;
+    }
+
+    /**
+     * Changes where ellipses, circles, and arcs are drawn relative to the
+     * coordinates passed to their respective methods.
+     *
+     * @param {string} mode - One of `this.CENTER` (default), `this.RADIUS`, `this.CORNER`, or `this.CORNERS`.
+     * @returns {Shapes} This instance, to allow chaining.
+     */
+    ellipseMode(mode) {
+        this._ellipseMode = mode;
+        return this;
+    }
+
+    /**
+     * Sets the width of the stroke used for points, lines, and the outlines
+     * of shapes. Requires a 2D canvas.
+     *
+     * @param {number} weight - Stroke width, in pixels.
+     * @returns {Shapes} This instance, to allow chaining.
+     */
+    strokeWeight(weight) {
+        this._strokeWeight = weight;
+        return this;
+    }
+
+    /**
+     * Sets the style for rendering the ends of lines.
+     *
+     * @param {string} cap - One of `this.ROUND` (default), `this.SQUARE`, or `this.PROJECT`.
+     * @returns {Shapes} This instance, to allow chaining.
+     */
+    strokeCap(cap) {
+        this._strokeCap = cap;
+        return this;
+    }
+
+    /**
+     * Sets the style of the joints that connect line segments.
+     *
+     * @param {string} join - One of `this.MITER` (default), `this.ROUND`, or `this.BEVEL`.
+     * @returns {Shapes} This instance, to allow chaining.
+     */
+    strokeJoin(join) {
+        this._strokeJoin = join;
+        return this;
+    }
+
+    /**
+     * Draws certain features with smooth (antialiased) edges.
+     *
+     * @returns {Shapes} This instance, to allow chaining.
+     */
+    smooth() {
+        this._smoothing = true;
+        if (this.type === '2d' && this.ctx.imageSmoothingEnabled !== undefined) {
+            this.ctx.imageSmoothingEnabled = true;
+        }
+        return this;
+    }
+
+    /**
+     * Draws certain features with jagged (aliased) edges.
+     *
+     * @returns {Shapes} This instance, to allow chaining.
+     */
+    noSmooth() {
+        this._smoothing = false;
+        if (this.type === '2d' && this.ctx.imageSmoothingEnabled !== undefined) {
+            this.ctx.imageSmoothingEnabled = false;
+        }
+        return this;
     }
 
     // ---------------------------------------------------------------
@@ -117,8 +227,9 @@ class Shapes {
      */
     rect(x, y, width, height, color) {
         this._require2D('rect');
+        const { rx, ry, rw, rh } = this._resolveRect(x, y, width, height);
         this.ctx.beginPath();
-        this.ctx.rect(x, y, width, height);
+        this.ctx.rect(rx, ry, rw, rh);
         this._applyFillAndStroke(color);
         return this;
     }
@@ -142,7 +253,9 @@ class Shapes {
         this.ctx.moveTo(x1, y1);
         this.ctx.lineTo(x2, y2);
         this.ctx.strokeStyle = color !== undefined ? color : (canvasStroke ? canvasStroke.color : '#ffffff');
-        this.ctx.lineWidth = lineWidth !== undefined ? lineWidth : (canvasStroke ? canvasStroke.width : 1);
+        this.ctx.lineWidth = lineWidth !== undefined ? lineWidth : (canvasStroke ? canvasStroke.width : this._strokeWeight);
+        this.ctx.lineCap = this._strokeCap;
+        this.ctx.lineJoin = this._strokeJoin;
         this.ctx.stroke();
         return this;
     }
@@ -169,6 +282,122 @@ class Shapes {
         this.ctx.closePath();
         this._applyFillAndStroke(color);
         return this;
+    }
+
+    /**
+     * Draws an ellipse (oval). Requires a 2D canvas. Interpretation of
+     * `a`/`b` (and whether `c`/`d` are needed) is controlled by the current
+     * {@link Shapes#ellipseMode}.
+     *
+     * @param {number} a - X coordinate, meaning depends on {@link Shapes#ellipseMode}.
+     * @param {number} b - Y coordinate, meaning depends on {@link Shapes#ellipseMode}.
+     * @param {number} c - Width (or, in `RADIUS` mode, the x-radius).
+     * @param {number} [d=c] - Height (or, in `RADIUS` mode, the y-radius). Defaults to `c`, producing a circle.
+     * @param {string} [color] - Fill color. Defaults to the canvas's current fill.
+     * @returns {Shapes} This instance, to allow chaining.
+     * @throws {Error} If the canvas was not created with a `'2d'` context.
+     */
+    ellipse(a, b, c, d = c, color) {
+        this._require2D('ellipse');
+        const { cx, cy, rx, ry } = this._resolveEllipse(a, b, c, d);
+        this.ctx.beginPath();
+        this.ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), 0, 0, Math.PI * 2);
+        this._applyFillAndStroke(color);
+        return this;
+    }
+
+    /**
+     * Draws an arc. Requires a 2D canvas. Position/size are interpreted the
+     * same way as {@link Shapes#ellipse}, via the current {@link
+     * Shapes#ellipseMode}.
+     *
+     * @param {number} a - X coordinate, meaning depends on {@link Shapes#ellipseMode}.
+     * @param {number} b - Y coordinate, meaning depends on {@link Shapes#ellipseMode}.
+     * @param {number} c - Width (or x-radius in `RADIUS` mode).
+     * @param {number} d - Height (or y-radius in `RADIUS` mode).
+     * @param {number} start - Angle to start the arc, in radians.
+     * @param {number} stop - Angle to stop the arc, in radians.
+     * @param {string} [mode='open'] - How the arc is closed: `'open'`, `'chord'`, or `'pie'`.
+     * @param {string} [color] - Fill color. Defaults to the canvas's current fill.
+     * @returns {Shapes} This instance, to allow chaining.
+     * @throws {Error} If the canvas was not created with a `'2d'` context.
+     */
+    arc(a, b, c, d, start, stop, mode = 'open', color) {
+        this._require2D('arc');
+        const { cx, cy, rx, ry } = this._resolveEllipse(a, b, c, d);
+        this.ctx.beginPath();
+        if (mode === 'pie') this.ctx.moveTo(cx, cy);
+        this.ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), 0, start, stop);
+        if (mode === 'pie') this.ctx.closePath();
+        else if (mode === 'chord') this.ctx.closePath();
+        this._applyFillAndStroke(color);
+        return this;
+    }
+
+    /**
+     * Draws a single point in space. Requires a 2D canvas. Rendered as a
+     * filled circle whose diameter is the current {@link Shapes#strokeWeight}.
+     *
+     * @param {number} x - X coordinate.
+     * @param {number} y - Y coordinate.
+     * @param {string} [color] - Point color. Defaults to the canvas's current stroke color, or fill color if no stroke is set.
+     * @returns {Shapes} This instance, to allow chaining.
+     * @throws {Error} If the canvas was not created with a `'2d'` context.
+     */
+    point(x, y, color) {
+        this._require2D('point');
+        const stroke = this.canvas.getStroke();
+        const resolved = color !== undefined ? color : (stroke ? stroke.color : this.canvas.getFill());
+        const radius = Math.max(this._strokeWeight, 1) / 2;
+        this.ctx.beginPath();
+        this.ctx.arc(x, y, radius, 0, Math.PI * 2);
+        this.ctx.fillStyle = resolved || '#ffffff';
+        this.ctx.fill();
+        return this;
+    }
+
+    /**
+     * Draws a quadrilateral (four-sided shape) from four vertices, given in
+     * order (clockwise or counter-clockwise). Requires a 2D canvas.
+     *
+     * @param {number} x1 - First vertex X.
+     * @param {number} y1 - First vertex Y.
+     * @param {number} x2 - Second vertex X.
+     * @param {number} y2 - Second vertex Y.
+     * @param {number} x3 - Third vertex X.
+     * @param {number} y3 - Third vertex Y.
+     * @param {number} x4 - Fourth vertex X.
+     * @param {number} y4 - Fourth vertex Y.
+     * @param {string} [color] - Fill color. Defaults to the canvas's current fill.
+     * @returns {Shapes} This instance, to allow chaining.
+     * @throws {Error} If the canvas was not created with a `'2d'` context.
+     */
+    quad(x1, y1, x2, y2, x3, y3, x4, y4, color) {
+        this._require2D('quad');
+        this.ctx.beginPath();
+        this.ctx.moveTo(x1, y1);
+        this.ctx.lineTo(x2, y2);
+        this.ctx.lineTo(x3, y3);
+        this.ctx.lineTo(x4, y4);
+        this.ctx.closePath();
+        this._applyFillAndStroke(color);
+        return this;
+    }
+
+    /**
+     * Draws a square. Requires a 2D canvas. Position is interpreted the
+     * same way as {@link Shapes#rect}, via the current {@link
+     * Shapes#rectMode}.
+     *
+     * @param {number} x - X coordinate, meaning depends on {@link Shapes#rectMode}.
+     * @param {number} y - Y coordinate, meaning depends on {@link Shapes#rectMode}.
+     * @param {number} size - Side length.
+     * @param {string} [color] - Fill color. Defaults to the canvas's current fill.
+     * @returns {Shapes} This instance, to allow chaining.
+     * @throws {Error} If the canvas was not created with a `'2d'` context.
+     */
+    square(x, y, size, color) {
+        return this.rect(x, y, size, size, color);
     }
 
     // ---------------------------------------------------------------
@@ -292,8 +521,62 @@ class Shapes {
         const stroke = this.canvas.getStroke();
         if (stroke) {
             this.ctx.strokeStyle = stroke.color;
-            this.ctx.lineWidth = stroke.width;
+            this.ctx.lineWidth = stroke.width || this._strokeWeight;
+            this.ctx.lineCap = this._strokeCap;
+            this.ctx.lineJoin = this._strokeJoin;
             this.ctx.stroke();
+        }
+    }
+
+    /**
+     * Resolves the `(x, y, width, height)` arguments accepted by {@link
+     * Shapes#rect}/{@link Shapes#square} into an absolute top-left corner
+     * and size, honoring the current {@link Shapes#rectMode}.
+     *
+     * @private
+     * @param {number} x - First coordinate, as passed to the calling method.
+     * @param {number} y - Second coordinate, as passed to the calling method.
+     * @param {number} width - Third argument, as passed to the calling method.
+     * @param {number} height - Fourth argument, as passed to the calling method.
+     * @returns {{rx: number, ry: number, rw: number, rh: number}} Top-left corner (`rx`, `ry`) and size (`rw`, `rh`), suitable for `ctx.rect()`.
+     */
+    _resolveRect(x, y, width, height) {
+        switch (this._rectMode) {
+            case this.CENTER:
+                return { rx: x - width / 2, ry: y - height / 2, rw: width, rh: height };
+            case this.RADIUS:
+                return { rx: x - width, ry: y - height, rw: width * 2, rh: height * 2 };
+            case this.CORNERS:
+                return { rx: x, ry: y, rw: width - x, rh: height - y };
+            case this.CORNER:
+            default:
+                return { rx: x, ry: y, rw: width, rh: height };
+        }
+    }
+
+    /**
+     * Resolves the `(a, b, c, d)` arguments accepted by {@link
+     * Shapes#ellipse}/{@link Shapes#arc} into an absolute center and
+     * x/y radii, honoring the current {@link Shapes#ellipseMode}.
+     *
+     * @private
+     * @param {number} a - First coordinate, as passed to the calling method.
+     * @param {number} b - Second coordinate, as passed to the calling method.
+     * @param {number} c - Third argument, as passed to the calling method.
+     * @param {number} d - Fourth argument, as passed to the calling method.
+     * @returns {{cx: number, cy: number, rx: number, ry: number}} Center (`cx`, `cy`) and radii (`rx`, `ry`), suitable for `ctx.ellipse()`.
+     */
+    _resolveEllipse(a, b, c, d) {
+        switch (this._ellipseMode) {
+            case this.RADIUS:
+                return { cx: a, cy: b, rx: c, ry: d };
+            case this.CORNER:
+                return { cx: a + c / 2, cy: b + d / 2, rx: c / 2, ry: d / 2 };
+            case this.CORNERS:
+                return { cx: (a + c) / 2, cy: (b + d) / 2, rx: (c - a) / 2, ry: (d - b) / 2 };
+            case this.CENTER:
+            default:
+                return { cx: a, cy: b, rx: c / 2, ry: d / 2 };
         }
     }
 

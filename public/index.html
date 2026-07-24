@@ -93,7 +93,18 @@
                     <kbd>/</kbd>
                 </div>
                 <div class="forge-topbar__actions">
-                    <button class="forge-icon-button" type="button" aria-label="Notifications">♢</button>
+                    <div class="forge-popover-anchor">
+                        <button class="forge-icon-button" id="notificationsButton" type="button" aria-label="Notifications" aria-haspopup="true" aria-expanded="false">
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path>
+                                <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"></path>
+                            </svg>
+                        </button>
+                        <div class="forge-popover" id="notificationsPopover" role="menu" aria-label="Notifications" hidden>
+                            <p class="forge-popover__title">Notifications</p>
+                            <p class="forge-popover__empty">You're all caught up. New activity will show up here.</p>
+                        </div>
+                    </div>
                     <button class="forge-button forge-button--primary" type="button" data-create-game>
                         <span aria-hidden="true">＋</span><span>New game</span>
                     </button>
@@ -143,6 +154,49 @@
                         <button class="forge-template" type="button" data-template="Blank Canvas"><span class="forge-template__art forge-template__art--blank">＋</span><strong>Blank Canvas</strong><small>Start from an empty scene</small></button>
                         <button class="forge-template" type="button" data-template="2D Platformer"><span class="forge-template__art forge-template__art--platformer">▰</span><strong>2D Platformer</strong><small>Movement, camera, and physics</small></button>
                         <button class="forge-template" type="button" data-template="Top Down"><span class="forge-template__art forge-template__art--topdown">◆</span><strong>Top Down</strong><small>Exploration-ready scene</small></button>
+                    </div>
+                </section>
+
+                <section class="forge-section" id="assets" aria-labelledby="assets-title">
+                    <div class="forge-section__header">
+                        <div><p class="forge-eyebrow">Library</p><h2 id="assets-title">Asset Library</h2></div>
+                    </div>
+                    <p class="forge-section__lede">Files placed in a project's <code>assets</code> folder show up here automatically.</p>
+                    <div class="forge-asset-list" id="assetList"></div>
+                    <div class="forge-empty" id="assetsEmptyState" hidden>
+                        <div class="forge-empty__icon" aria-hidden="true">▦</div>
+                        <h3>No assets yet</h3>
+                        <p>Add files to a project's assets folder to see them here.</p>
+                    </div>
+                </section>
+
+                <section class="forge-section" id="settings" aria-labelledby="settings-title">
+                    <div class="forge-section__header">
+                        <div><p class="forge-eyebrow">Account</p><h2 id="settings-title">Settings</h2></div>
+                    </div>
+                    <div class="forge-settings-grid">
+                        <div class="forge-card">
+                            <h3>Account details</h3>
+                            <dl class="forge-detail-list">
+                                <div><dt>Display name</dt><dd id="settingsDisplayName">—</dd></div>
+                                <div><dt>Created</dt><dd id="settingsCreatedAt">—</dd></div>
+                            </dl>
+                            <button class="forge-button forge-button--secondary" type="button" id="settingsLogoutButton">Log out</button>
+                        </div>
+                        <div class="forge-card">
+                            <h3>Change password</h3>
+                            <form class="forge-settings-form" id="changePasswordForm">
+                                <label class="forge-field">Current password
+                                    <input id="currentPassword" name="currentPassword" type="password" required autocomplete="current-password">
+                                </label>
+                                <label class="forge-field">New password
+                                    <input id="newPassword" name="newPassword" type="password" required minlength="8" autocomplete="new-password">
+                                </label>
+                                <p class="forge-form-error" id="changePasswordError" role="alert"></p>
+                                <p class="forge-form-success" id="changePasswordSuccess"></p>
+                                <button class="forge-button forge-button--primary" type="submit">Update password</button>
+                            </form>
+                        </div>
                     </div>
                 </section>
             </main>

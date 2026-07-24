@@ -4,7 +4,7 @@ const path = require("node:path");
 const fs = require("node:fs/promises");
 const https = require("node:https");
 const express = require("express");
-const { createGame, listGames, readGame } = require("../src/game-manager");
+const { createGame, listGames, readGame, listAssets, saveScene } = require("../src/game-manager");
 const {
   SESSION_COOKIE,
   sessionCookieOptions,
@@ -12,6 +12,7 @@ const {
   registerAccount,
   loginAccount,
   logoutAccount,
+  changePassword,
   authenticateLocalRequest
 } = require("../src/account-manager");
 
@@ -72,6 +73,14 @@ app.post("/api/account/logout", async (req, res, next) => {
 // Everything else under /api requires an authenticated session.
 app.use("/api", (req, res, next) => authenticateLocalRequest(ROOT, req, res, next));
 
+app.post("/api/account/change-password", async (req, res, next) => {
+  try {
+    const { account, sessionToken } = await changePassword(ROOT, req.body || {});
+    res.cookie(SESSION_COOKIE, sessionToken, sessionCookieOptions());
+    res.status(200).json({ account });
+  } catch (error) { next(error); }
+});
+
 app.get("/api/games", async (_req, res, next) => {
   try { res.json({ games: await listGames(ROOT) }); } catch (error) { next(error); }
 });
@@ -79,7 +88,7 @@ app.get("/api/games", async (_req, res, next) => {
 app.post("/api/games", async (req, res, next) => {
   try {
     const game = await createGame(ROOT, req.body || {});
-    res.status(201).json({ game, editorUrl: `/editor/?game=${encodeURIComponent(game.slug)}` });
+    res.status(201).json({ game, editorUrl: `/editor/${encodeURIComponent(game.slug)}` });
   } catch (error) { next(error); }
 });
 
@@ -88,8 +97,20 @@ app.get("/api/games/:slug", async (req, res, next) => {
   catch (error) { next(error); }
 });
 
+app.get("/api/assets", async (_req, res, next) => {
+  try { res.json({ games: await listAssets(ROOT) }); } catch (error) { next(error); }
+});
+
+app.put("/api/games/:slug/scene", async (req, res, next) => {
+  try { res.json({ scene: await saveScene(ROOT, req.params.slug, req.body || {}) }); }
+  catch (error) { next(error); }
+});
+
 app.use("/assets", express.static(path.join(ROOT, "assets"), { fallthrough: false }));
-app.use("/editor", express.static(path.join(ROOT, "public", "editor")));
+app.use("/utils", express.static(path.join(ROOT, "utils", "src"), { fallthrough: false }));
+app.get(["/editor", "/editor/:slug"], (_req, res) => {
+  res.sendFile(path.join(ROOT, "public", "editor.html"));
+});
 app.use(express.static(path.join(ROOT, "public")));
 
 app.use((error, _req, res, _next) => {

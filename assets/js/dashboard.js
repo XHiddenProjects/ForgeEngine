@@ -57,9 +57,9 @@
   async function showDashboard(account) {
     authScreen.hidden = true;
     app.hidden = false;
-    $("#profileName").textContent = account.displayName || "Developer";
-    $("#settingsDisplayName").textContent = account.displayName || "Developer";
-    $("#settingsCreatedAt").textContent = account.createdAt ? new Date(account.createdAt).toLocaleDateString() : "—";
+    $("#profileName").textContent = account?.displayName || "Developer";
+    $("#settingsDisplayName").textContent = account?.displayName || "Developer";
+    $("#settingsCreatedAt").textContent = account?.createdAt ? new Date(account?.createdAt).toLocaleDateString() : "—";
     await Promise.all([loadGames(), loadAssets(), updateStorage()]);
   }
 
@@ -137,7 +137,7 @@
       const open = document.createElement("a");
       open.className = "forge-button forge-button--secondary";
       open.textContent = "Open editor";
-      open.href = `/editor/?game=${encodeURIComponent(game.slug)}`;
+      open.href = `/editor/${encodeURIComponent(game.slug)}`;
 
       row.append(info, open);
       return row;
@@ -157,7 +157,7 @@
       card.className = "forge-project";
       const title = document.createElement("h3"); title.textContent = game.name;
       const meta = document.createElement("p"); meta.textContent = `${game.template} · ${new Date(game.updatedAt).toLocaleString()}`;
-      const open = document.createElement("a"); open.className = "forge-button forge-button--primary"; open.textContent = "Open editor"; open.href = `/editor/?game=${encodeURIComponent(game.slug)}`;
+      const open = document.createElement("a"); open.className = "forge-button forge-button--primary"; open.textContent = "Open editor"; open.href = `/editor/${encodeURIComponent(game.slug)}`;
       card.append(title, meta, open); return card;
     }));
     empty.hidden = visible.length !== 0;

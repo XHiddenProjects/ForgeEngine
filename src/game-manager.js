@@ -81,4 +81,54 @@ async function listAssets(root) {
   return perGame;
 }
 
-module.exports = { createGame, listGames, readGame, listAssets };
+const OBJECT_TYPES = new Set(["camera", "light", "sprite", "mesh", "group", "collider", "ui", "audio"]);
+
+function sanitizeSceneObject(input) {
+  const id = String(input?.id || "").trim().slice(0, 64);
+  if (!id) return null;
+  const num = (value, fallback = 0) => (Number.isFinite(value) ? value : fallback);
+  return {
+    id,
+    name: String(input?.name || "Game Object").slice(0, 64),
+    type: OBJECT_TYPES.has(input?.type) ? input.type : "mesh",
+    icon: String(input?.icon || "◇").slice(0, 4),
+    parent: Boolean(input?.parent),
+    indent: Math.max(0, Math.min(4, Math.round(num(input?.indent, 0)))),
+    position: {
+      x: num(input?.position?.x),
+      y: num(input?.position?.y),
+      z: num(input?.position?.z)
+    }
+  };
+}
+
+/**
+ * Persists the editor's scene tree (name + objects) to `scenes/main.scene.json`
+ * and bumps the game's `updatedAt` so the dashboard's "recently edited" and
+ * sort-by-updated views reflect the save.
+ */
+async function saveScene(root, slug, input) {
+  const dir = gamePath(root, slug);
+  const configPath = path.join(dir, "game.config.json");
+  let config;
+  try { config = JSON.parse(await fs.readFile(configPath, "utf8")); }
+  catch (error) { if (error.code === "ENOENT") throw httpError(404, "Game not found"); throw error; }
+
+  if (!input || typeof input !== "object" || !Array.isArray(input.objects)) {
+    throw httpError(400, "Scene must include an objects array");
+  }
+  if (input.objects.length > 500) throw httpError(400, "A scene can contain at most 500 objects");
+
+  const scene = {
+    name: String(input.name || "Main").trim().slice(0, 64) || "Main",
+    objects: input.objects.map(sanitizeSceneObject).filter(Boolean)
+  };
+
+  await fs.writeFile(path.join(dir, "scenes", "main.scene.json"), JSON.stringify(scene, null, 2));
+  config.updatedAt = new Date().toISOString();
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+
+  return scene;
+}
+
+module.exports = { createGame, listGames, readGame, listAssets, saveScene };

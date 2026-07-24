@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ForgeEngine — Demo</title>
+<link rel="stylesheet" href="/assets/css/demo.css">
+</head>
+<body>
+
+<div class="demo-stage">
+  <h1 class="demo-stage__title">ForgeEngine demo — bouncing balls, orbiting satellite, sweeping arc</h1>
+  <p class="demo-stage__subtitle">Built with Color, Canvas, Shapes, Constants, and Sketch/createSketch from utils/</p>
+</div>
+
+<!--
+  Dependency order matters here because these files attach themselves to
+  the shared global scope as sibling <script> tags (see the header comments
+  inside each utils/src/*.js file):
+
+    color.js      -> no deps, exposes window.Color
+    transform.js  -> no deps, exposes window.Transform
+    canvas.js     -> needs window.Color,     exposes window.Canvas
+    shapes.js     -> needs window.Transform, exposes window.Shapes
+    constants.js  -> no deps, exposes window.Constants (+ PI, TWO_PI, ... directly)
+    structure.js  -> needs window.Canvas,    exposes window.Sketch, window.createSketch
+
+  Served from /utils, which maps to utils/src/ on disk (see core/index.js).
+-->
+<script src="/utils/color.js"></script>
+<script src="/utils/transform.js"></script>
+<script src="/utils/canvas.js"></script>
+<script src="/utils/shapes.js"></script>
+<script src="/utils/constants.js"></script>
+<script src="/utils/structure.js"></script>
+<script src="/assets/js/demo.js"></script>
+
+</body>
+</html>

@@ -1,7 +1,7 @@
 {
   "name": "ForgeEngine",
   "version": "1.0.0",
-  "private": true,
+  "private": false,
   "description": "Local ForgeEngine game dashboard and editor",
   "main": "core/index.js",
   "type": "commonjs",

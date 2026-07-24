@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="ForgeEngine editor">
+  <title>ForgeEngine Editor</title>
+  <link rel="stylesheet" href="/assets/css/editor.css">
+</head>
+<body>
+  <div class="app" id="app">
+    <header class="titlebar">
+      <a class="brand" href="/"><span class="brand-mark">F</span><span>ForgeEngine</span><span class="version">Editor</span></a>
+      <div class="project-title"><span class="status-dot"></span><span id="projectName">Loading…</span> <span class="muted">— <span id="sceneNameLabel">Scene</span></span></div>
+      <div class="window-actions"><button aria-label="Minimize">—</button><button aria-label="Maximize">□</button><button class="danger" aria-label="Close" title="Close editor" id="closeEditor">×</button></div>
+    </header>
+
+    <nav class="menubar" aria-label="Main menu">
+      <div class="menu-items">
+        <button data-menu="File">File</button><button data-menu="Edit">Edit</button><button data-menu="Assets">Assets</button><button data-menu="Scene">Scene</button><button data-menu="Project">Project</button><button data-menu="Build">Build</button><button data-menu="Window">Window</button><button data-menu="Help">Help</button>
+      </div>
+      <div class="menu-right">
+        <button class="icon-button" title="Command Palette">⌘</button>
+        <button class="icon-button" title="Notifications" aria-label="Notifications">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path>
+            <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"></path>
+          </svg>
+        </button>
+        <button class="avatar" title="User" id="userAvatar">—</button>
+      </div>
+    </nav>
+
+    <section class="toolbar">
+      <div class="tool-group" id="transformTools">
+        <button class="tool active" data-tool="select" title="Select (Q)">↖</button><button class="tool" data-tool="move" title="Move (W)">✣</button><button class="tool" data-tool="rotate" title="Rotate (E)">↻</button><button class="tool" data-tool="scale" title="Scale (R)">⤢</button>
+      </div>
+      <div class="tool-group"><button class="text-tool active">Global</button><button class="text-tool">Center</button><button class="text-tool active" id="snapToggle">Snap 16</button></div>
+      <div class="play-controls"><button id="playButton" class="play" title="Play">▶</button><button id="pauseButton" title="Pause">Ⅱ</button><button id="stopButton" title="Stop">■</button></div>
+      <div class="viewport-modes" id="viewportModes"><button class="active" data-mode="2d">2D</button><button data-mode="25d">2.5D</button><button data-mode="3d">3D</button></div>
+      <div class="toolbar-spacer"></div>
+      <div class="tool-group"><button class="text-tool">Gizmos</button><button class="text-tool">Local</button><button class="text-tool" id="layoutReset">Reset Layout</button></div>
+    </section>
+
+    <main class="workspace" id="workspace">
+      <aside class="panel hierarchy-panel" id="hierarchyPanel">
+        <div class="panel-tabs"><button class="active">Scene</button><button>Layers</button><span></span><button class="panel-action" id="addObject" title="Add object">＋</button></div>
+        <div class="panel-toolbar"><div class="search"><span>⌕</span><input id="sceneSearch" placeholder="Search scene"></div><button title="Filter">≡</button></div>
+        <div class="scene-header"><span class="chevron">⌄</span><span class="scene-icon">◇</span><strong id="sceneHeaderName">Scene</strong><span class="dirty" id="dirtyDot" style="visibility:hidden">●</span></div>
+        <div class="tree" id="sceneTree"></div>
+        <div class="panel-footer"><span id="objectCount">0 objects</span><span id="selectionCount">0 selected</span></div>
+      </aside>
+
+      <div class="splitter vertical" data-split="left" aria-hidden="true"></div>
+
+      <section class="viewport-wrap">
+        <div class="viewport-tabs"><button class="active"><span class="tab-dot"></span><span id="viewportTabName">Scene</span> <span class="close">×</span></button><button>＋</button><div class="viewport-tab-spacer"></div><button title="Split viewport">▦</button><button title="Maximize viewport">□</button></div>
+        <div class="viewport" id="viewport" data-mode="2d">
+          <canvas id="gridCanvas"></canvas>
+          <div class="viewport-overlay top-left"><button id="cameraMode">Orthographic</button><button id="shadingMode">Shaded</button><button id="gridToggle">Grid</button></div>
+          <div class="viewport-overlay top-right"><button>☀</button><button>◐</button><button>◎</button></div>
+          <div class="axis-gizmo"><span class="axis-y">Y</span><span class="axis-x">X</span><span class="axis-z">Z</span></div>
+          <div id="viewportObjects"></div>
+          <div class="viewport-hint" id="viewportHint">2D Grid · Drag to pan · Wheel to zoom</div>
+        </div>
+        <div class="viewport-status"><span id="cursorPosition">X 0&nbsp;&nbsp;Y 0</span><span>Grid 16 px</span><span>Zoom <strong id="zoomValue">100%</strong></span><span class="fps">60 FPS</span></div>
+      </section>
+
+      <div class="splitter vertical" data-split="right" aria-hidden="true"></div>
+
+      <aside class="panel inspector-panel" id="inspectorPanel">
+        <div class="panel-tabs"><button class="active">Inspector</button><button>Node</button><span></span><button class="panel-action" title="Lock inspector">◇</button><button class="panel-action">⋮</button></div>
+        <div id="inspectorEmpty" class="placeholder-view" style="height:180px;display:none"><strong>No object selected</strong><p>Select an object in the Scene panel, or add a new one.</p></div>
+        <div id="inspectorContent">
+          <div class="inspector-head"><div class="object-icon" id="objectIcon">◇</div><div><input id="objectName" value=""><div class="type-label" id="objectType">Game Object</div></div><label class="switch"><input id="objectEnabled" type="checkbox" checked><span></span></label></div>
+          <div class="tag-row"><label>Tag<select><option>Untagged</option><option>Player</option><option>Environment</option></select></label><label>Layer<select><option>Default</option><option>Gameplay</option><option>UI</option></select></label></div>
+          <div class="component open">
+            <button class="component-head"><span>⌄</span><strong>Transform</strong><i>⋮</i></button>
+            <div class="component-body transform-fields">
+              <div class="field-row"><label>Position</label><div class="vector"><input data-axis="x" value="0"><input data-axis="y" value="0"><input data-axis="z" value="0"></div></div>
+              <div class="field-row"><label>Rotation</label><div class="vector"><input value="0°"><input value="0°"><input value="0°"></div></div>
+              <div class="field-row"><label>Scale</label><div class="vector"><input value="1"><input value="1"><input value="1"></div></div>
+            </div>
+          </div>
+          <div class="component"><button class="component-head"><span>›</span><strong>Box Collider 2D</strong><i>⋮</i></button></div>
+          <div class="component"><button class="component-head"><span>›</span><strong>Script</strong><i>⋮</i></button></div>
+          <button class="add-component" id="addComponent">＋ Add Component</button>
+          <button class="add-component" id="deleteObject" style="color:var(--danger)">Delete Object</button>
+        </div>
+      </aside>
+
+      <div class="splitter horizontal" data-split="bottom" aria-hidden="true"></div>
+
+      <section class="bottom-panel" id="bottomPanel">
+        <div class="bottom-tabs" id="bottomTabs"><button class="active" data-bottom="assets">Assets</button><button data-bottom="console">Console <span class="badge" id="consoleBadge">0</span></button><button data-bottom="animation">Animation</button><button data-bottom="audio">Audio</button><button data-bottom="shader">Shader</button><button data-bottom="profiler">Profiler</button><span></span><button>⌃</button><button>×</button></div>
+        <div class="bottom-content active" data-content="assets">
+          <aside class="asset-tree"><div class="asset-root">◇ Assets</div><button class="active">▾ Project</button></aside>
+          <div class="asset-browser"><div class="asset-toolbar"><div class="breadcrumbs">Assets <b>›</b> <span id="assetBreadcrumb">Project</span></div><div class="search compact"><span>⌕</span><input placeholder="Search assets" id="assetSearch"></div><button>▦</button><button>☷</button></div><div class="asset-grid" id="assetGrid"></div></div>
+        </div>
+        <div class="bottom-content console-view" data-content="console"><div class="console-toolbar"><button>Clear</button><button>Collapse</button><button class="active">Info</button><button class="active warning">Warnings</button><button class="active error">Errors</button></div><div class="console-list" id="consoleList"></div></div>
+        <div class="bottom-content placeholder-view" data-content="animation"><strong>Animation Timeline</strong><p>The future animation module will mount here.</p></div>
+        <div class="bottom-content placeholder-view" data-content="audio"><strong>Audio Mixer</strong><p>Audio buses, effects and waveform tools will mount here.</p></div>
+        <div class="bottom-content placeholder-view" data-content="shader"><strong>Shader Editor</strong><p>Material properties and node-based shader tools will mount here.</p></div>
+        <div class="bottom-content placeholder-view" data-content="profiler"><strong>Profiler</strong><p>Frame timing, memory and render statistics will mount here.</p></div>
+      </section>
+    </main>
+    <div class="toast" id="toast"></div>
+    <div class="menu-popover" id="menuPopover"></div>
+  </div>
+  <script src="/assets/js/editor.js"></script>
+</body>
+</html>

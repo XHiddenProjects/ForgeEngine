@@ -1,0 +1,35 @@
+html, body {
+    margin: 0;
+    height: 100%;
+    background: #05070d;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.demo-stage {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+}
+
+.demo-stage__title {
+    color: #e8ecff;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    margin: 0;
+}
+
+.demo-stage__subtitle {
+    color: #7d88ab;
+    font-size: 13px;
+    margin: -8px 0 0;
+}
+
+#demo {
+    border-radius: 10px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
