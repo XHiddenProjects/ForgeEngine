@@ -1,1848 +1,2378 @@
 'use strict';
 
-// Wrapped in an IIFE - see the comment at the top of Transform.js for why:
-// this file may be loaded as a sibling <script> tag alongside the other
-// engine files, all sharing ONE global scope. Sound has no dependency on
-// any of them, so - like Transform.js/IO.js/dom.js - it only ever leaks
-// its name via an explicit `root.Sound` assignment, never a top-level
-// `const`/`class` declaration.
-(function (root, factory) {
-    if (typeof module === 'object' && module.exports) {
-        const Sound = factory();
-        module.exports = Sound;
-        module.exports.Sound = Sound;
-    } else if (root) {
-        root.Sound = factory();
-    }
-})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+const fs = require('fs');
+const constants = require('./constants.js');
 
-// ---------------------------------------------------------------
-// Shared AudioContext (module-level singleton, like p5.sound's)
-// ---------------------------------------------------------------
+/**
+ * Determines whether a path is an HTTP or HTTPS URL.
+ *
+ * @param {*} p - P value.
+ *
+ * @returns {boolean} The resulting value.
+ */
+function isURL(p) { return /^https?:\/\//i.test(p); }
+/**
+ * Clamps a number to an inclusive range.
+ *
+ * @param {number} n - N value.
+ * @param {number} low - Low value.
+ * @param {number} high - High value.
+ *
+ * @returns {number} The resulting value.
+ */
+function clamp(n, low, high) { return Math.max(low, Math.min(high, n)); }
+
+// =============================================================================
+// Virtual Web Audio shim
+//
+// Node has no Web Audio API (no real audio thread, no speakers to render
+// to). Every class in this file used to be built directly on the browser's
+// `AudioContext` — headless now, they're built on this instead: a small,
+// dependency-free stand-in that tracks the same node graph, the same
+// parameters, and the same timing a real `AudioContext` would, using
+// `setTimeout`/wall-clock time in place of an audio thread (the same trick
+// structure.js uses for its draw loop). Nothing here produces actual sound;
+// a real front-end can later replay the exact same `connect()`/`start()`/
+// `setValueAtTime()` calls against a genuine `AudioContext` to make it
+// audible. This keeps the higher-level classes below (Oscillator, Envelope,
+// SoundFile, ...) — and the game code that calls them — identical to what
+// they'd look like on top of the real thing.
+// =============================================================================
+
+/**
+ * A scheduled, automatable parameter — the headless equivalent of
+ * `AudioParam`. Values set for "now" apply immediately; values scheduled
+ * for the future are applied via a real timer once that time arrives.
+ */
+class VirtualAudioParam {
+  /**
+   * Creates a new VirtualAudioParam instance.
+   *
+   * @param {number} defaultValue - Defaultvalue value.
+   * @param {*} ctx - Ctx value.
+   */
+  constructor(defaultValue, ctx) {
+    this.value = defaultValue;
+    this._ctx = ctx;
+    this._timer = null;
+  }
+  /**
+   * Schedules a parameter value at an audio-context time.
+   *
+   * @param {*} value - Value value.
+   * @param {number} time - Time value.
+   *
+   * @returns {VirtualAudioParam} This instance for chaining.
+   */
+  setValueAtTime(value, time) { this._schedule(value, time); return this; }
+  /**
+   * Schedules a linear ramp to a target value.
+   *
+   * @param {*} value - Value value.
+   * @param {number} time - Time value.
+   *
+   * @returns {VirtualAudioParam} This instance for chaining.
+   */
+  linearRampToValueAtTime(value, time) { this._schedule(value, time); return this; }
+  /**
+   * Schedules an exponential ramp to a target value.
+   *
+   * @param {*} value - Value value.
+   * @param {number} time - Time value.
+   *
+   * @returns {VirtualAudioParam} This instance for chaining.
+   */
+  exponentialRampToValueAtTime(value, time) { this._schedule(value, time); return this; }
+  /**
+   * Schedules a value curve over a duration.
+   *
+   * @param {Array} curve - Curve value.
+   * @param {number} time - Time value.
+   * @param {number} duration - Duration value.
+   *
+   * @returns {VirtualAudioParam} This instance for chaining.
+   */
+  setValueCurveAtTime(curve, time, duration) { this._schedule(curve[curve.length - 1], time + duration); return this; }
+  /**
+   * Cancels the pending scheduled parameter update.
+   *
+   * @returns {VirtualAudioParam} This instance for chaining.
+   */
+  cancelScheduledValues() {
+    if (this._timer) { clearTimeout(this._timer); this._timer = null; }
+    return this;
+  }
+  /**
+   * Applies or schedules a virtual audio-parameter value.
+   *
+   * @param {*} value - Value value.
+   * @param {number} time - Time value.
+   *
+   * @returns {VirtualAudioParam} This instance for chaining.
+   */
+  _schedule(value, time) {
+    this.cancelScheduledValues();
+    const delayMs = (time - this._ctx.currentTime) * 1000;
+    if (delayMs <= 0) { this.value = value; return; }
+    this._timer = setTimeout(() => { this.value = value; this._timer = null; }, delayMs);
+    if (this._timer.unref) this._timer.unref();
+  }
+}
+
+/** Base class for every virtual node — tracks outgoing connections only; there's no real signal to carry. */
+class VirtualAudioNode {
+  /**
+   * Creates a new VirtualAudioNode instance.
+   *
+   * @param {*} kind - Kind value.
+   * @param {*} ctx - Ctx value.
+   */
+  constructor(kind, ctx) {
+    this.kind = kind;
+    this.ctx = ctx;
+    this._outputs = new Set();
+  }
+  /**
+   * Connects this audio node to a destination.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} dest - Dest value.
+   *
+   * @returns {*} The resulting value.
+   */
+  connect(dest) { this._outputs.add(dest); return dest; }
+  /**
+   * Disconnects one or all outgoing audio connections.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} dest - Dest value.
+   *
+   * @returns {VirtualAudioNode} This instance for chaining.
+   */
+  disconnect(dest) {
+    if (dest === undefined) this._outputs.clear();
+    else this._outputs.delete(dest);
+    return this;
+  }
+}
+
+class VirtualGainNode extends VirtualAudioNode {
+  /**
+   * Creates a new VirtualGainNode instance.
+   *
+   * @param {*} ctx - Ctx value.
+   */
+  constructor(ctx) { super('gain', ctx); this.gain = new VirtualAudioParam(1, ctx); }
+}
+class VirtualBiquadFilterNode extends VirtualAudioNode {
+  /**
+   * Creates a new VirtualBiquadFilterNode instance.
+   *
+   * @param {*} ctx - Ctx value.
+   */
+  constructor(ctx) {
+    super('biquad', ctx);
+    this.type = 'lowpass';
+    this.frequency = new VirtualAudioParam(350, ctx);
+    this.Q = new VirtualAudioParam(1, ctx);
+    this.gain = new VirtualAudioParam(0, ctx);
+  }
+}
+class VirtualDelayNode extends VirtualAudioNode {
+  /**
+   * Creates a new VirtualDelayNode instance.
+   *
+   * @param {*} ctx - Ctx value.
+   * @param {*} [maxDelayTime=1] - Maxdelaytime value.
+   */
+  constructor(ctx, maxDelayTime = 1) { super('delay', ctx); this.delayTime = new VirtualAudioParam(0, ctx); this.maxDelayTime = maxDelayTime; }
+}
+class VirtualStereoPannerNode extends VirtualAudioNode {
+  /**
+   * Creates a new VirtualStereoPannerNode instance.
+   *
+   * @param {*} ctx - Ctx value.
+   */
+  constructor(ctx) { super('stereoPanner', ctx); this.pan = new VirtualAudioParam(0, ctx); }
+}
+class VirtualPannerNode extends VirtualAudioNode {
+  /**
+   * Creates a new VirtualPannerNode instance.
+   *
+   * @param {*} ctx - Ctx value.
+   */
+  constructor(ctx) {
+    super('panner3d', ctx);
+    this.positionX = new VirtualAudioParam(0, ctx);
+    this.positionY = new VirtualAudioParam(0, ctx);
+    this.positionZ = new VirtualAudioParam(0, ctx);
+    this.panningModel = 'HRTF';
+    this.distanceModel = 'linear';
+    this.maxDistance = 10000;
+    this.rolloffFactor = 1;
+  }
+}
+class VirtualConvolverNode extends VirtualAudioNode {
+  /**
+   * Creates a new VirtualConvolverNode instance.
+   *
+   * @param {*} ctx - Ctx value.
+   */
+  constructor(ctx) { super('convolver', ctx); this.buffer = null; }
+}
+class VirtualAnalyserNode extends VirtualAudioNode {
+  /**
+   * Creates a new VirtualAnalyserNode instance.
+   *
+   * @param {*} ctx - Ctx value.
+   */
+  constructor(ctx) {
+    super('analyser', ctx);
+    this.fftSize = 2048;
+    this.smoothingTimeConstant = 0.8;
+    this._source = null; // tracked so analyze()/waveform()/getLevel() have something to approximate from
+  }
+  /**
+   * Returns the current frequencyBinCount value.
+   *
+   * @returns {number} The resulting value.
+   */
+  get frequencyBinCount() { return this.fftSize / 2; }
+  // No real audio thread to sample from — these return correctly-sized,
+  // silent-signal data. A real front-end swaps this node for a genuine
+  // AnalyserNode to get real spectral/waveform data.
+  /**
+   * Writes silent byte-frequency data into an array.
+   *
+   * @param {Array} arr - Arr value.
+   *
+   * @returns {void} The resulting value.
+   */
+  getByteFrequencyData(arr) { arr.fill(0); }
+  /**
+   * Writes silent decibel-frequency data into an array.
+   *
+   * @param {Array} arr - Arr value.
+   *
+   * @returns {void} The resulting value.
+   */
+  getFloatFrequencyData(arr) { arr.fill(-Infinity); }
+  /**
+   * Writes centered byte waveform data into an array.
+   *
+   * @param {Array} arr - Arr value.
+   *
+   * @returns {void} The resulting value.
+   */
+  getByteTimeDomainData(arr) { arr.fill(128); }
+  /**
+   * Writes silent floating-point waveform data into an array.
+   *
+   * @param {Array} arr - Arr value.
+   *
+   * @returns {void} The resulting value.
+   */
+  getFloatTimeDomainData(arr) { arr.fill(0); }
+}
+class VirtualOscillatorNode extends VirtualAudioNode {
+  /**
+   * Creates a new VirtualOscillatorNode instance.
+   *
+   * @param {*} ctx - Ctx value.
+   */
+  constructor(ctx) {
+    super('oscillator', ctx);
+    this.type = 'sine';
+    this.frequency = new VirtualAudioParam(440, ctx);
+    this.detune = new VirtualAudioParam(0, ctx);
+    this.onended = null;
+  }
+  /**
+   * Starts or schedules the audio source.
+   *
+   * @throws {Error} When invoked on an abstract source or unavailable headless input.
+   *
+   * @returns {VirtualOscillatorNode} This instance for chaining.
+   */
+  start() { /* nothing to schedule — no audio thread to start */ }
+  /**
+   * Stops or schedules the audio source.
+   *
+   * @param {number} [time=0] - Time value.
+   *
+   * @returns {VirtualOscillatorNode} This instance for chaining.
+   */
+  stop(time = 0) {
+    const delayMs = Math.max(0, (time - this.ctx.currentTime) * 1000);
+    const timer = setTimeout(() => { if (this.onended) this.onended(); }, delayMs);
+    if (timer.unref) timer.unref();
+  }
+}
+class VirtualBufferSourceNode extends VirtualAudioNode {
+  /**
+   * Creates a new VirtualBufferSourceNode instance.
+   *
+   * @param {*} ctx - Ctx value.
+   */
+  constructor(ctx) {
+    super('bufferSource', ctx);
+    this.buffer = null;
+    this.playbackRate = new VirtualAudioParam(1, ctx);
+    this.loop = false;
+    this.loopStart = 0;
+    this.loopEnd = 0;
+    this.onended = null;
+    this._endTimer = null;
+  }
+  /**
+   * Starts or schedules the audio source.
+   *
+   * @param {number} [time=0] - Time value.
+   * @param {number} [offset=0] - Offset value.
+   * @param {number} duration - Duration value.
+   *
+   * @throws {Error} When invoked on an abstract source or unavailable headless input.
+   *
+   * @returns {VirtualBufferSourceNode} This instance for chaining.
+   */
+  start(time = 0, offset = 0, duration) {
+    if (this.loop) return; // loops run until stop() is called explicitly
+    const bufDuration = duration !== undefined ? duration : (this.buffer ? Math.max(0, this.buffer.duration - offset) : 0);
+    const rate = this.playbackRate.value || 1;
+    const delayMs = Math.max(0, (time - this.ctx.currentTime) * 1000) + (bufDuration / Math.abs(rate)) * 1000;
+    this._endTimer = setTimeout(() => { this._endTimer = null; if (this.onended) this.onended(); }, delayMs);
+    if (this._endTimer.unref) this._endTimer.unref();
+  }
+  /**
+   * Stops or schedules the audio source.
+   *
+   * @param {number} [time=0] - Time value.
+   *
+   * @returns {VirtualBufferSourceNode} This instance for chaining.
+   */
+  stop(time = 0) {
+    if (this._endTimer) { clearTimeout(this._endTimer); this._endTimer = null; }
+    const delayMs = Math.max(0, (time - this.ctx.currentTime) * 1000);
+    const timer = setTimeout(() => { if (this.onended) this.onended(); }, delayMs);
+    if (timer.unref) timer.unref();
+  }
+}
+
+/**
+ * Creates an in-memory multichannel audio buffer.
+ *
+ * @param {number} numberOfChannels - Numberofchannels value.
+ * @param {number} length - Length value.
+ * @param {number} sampleRate - Samplerate value.
+ *
+ * @returns {Object} The resulting value.
+ */
+function createVirtualAudioBuffer(numberOfChannels, length, sampleRate) {
+  const channels = Array.from({ length: numberOfChannels }, () => new Float32Array(length));
+  return {
+    numberOfChannels,
+    length,
+    sampleRate,
+    duration: sampleRate > 0 ? length / sampleRate : 0,
+    getChannelData(channel) { return channels[channel]; }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Minimal RIFF/WAVE (PCM) decoder — the one audio format Node can decode
+// without a real codec library. Handles 8/16/32-bit integer and 32-bit
+// float PCM. Anything else (mp3, ogg, ...) isn't decodable headlessly and
+// is reported via `onerror`, same as p5.sound does for unsupported formats.
+// ---------------------------------------------------------------------------
+/**
+ * Decodes supported PCM WAV bytes into a virtual audio buffer.
+ *
+ * @param {*} buf - Buf value.
+ *
+ * @returns {Object|null} The resulting value.
+ */
+function decodeWav(buf) {
+  /**
+   * Performs the if operation.
+   *
+   * @param {*} buf.length < 12 || buf.toString('ascii', 0, 4 - Buf.length < 12 || buf.tostring('ascii', 0, 4 value.
+   *
+   * @returns {VirtualBufferSourceNode} This instance for chaining.
+   */
+  if (buf.length < 12 || buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WAVE') return null;
+
+  let offset = 12;
+  let fmt = null;
+  let dataOffset = -1;
+  let dataLength = 0;
+  /**
+   * Performs the while operation.
+   *
+   * @param {*} [offset + 8 <=buf.length] - Offset + 8 < value.
+   *
+   * @returns {VirtualBufferSourceNode} This instance for chaining.
+   */
+  while (offset + 8 <= buf.length) {
+    const id = buf.toString('ascii', offset, offset + 4);
+    const size = buf.readUInt32LE(offset + 4);
+    const body = offset + 8;
+    if (id === 'fmt ') {
+      fmt = {
+        audioFormat: buf.readUInt16LE(body),
+        numChannels: buf.readUInt16LE(body + 2),
+        sampleRate: buf.readUInt32LE(body + 4),
+        bitsPerSample: buf.readUInt16LE(body + 14)
+      };
+    } else if (id === 'data') {
+      dataOffset = body;
+      dataLength = size;
+    }
+    offset = body + size + (size % 2); // chunks are word-aligned
+  }
+  /**
+   * Performs the if operation.
+   *
+   * @param {*} [!fmt || dataOffset=== -1] - !fmt || dataoffset value.
+   *
+   * @returns {VirtualBufferSourceNode} This instance for chaining.
+   */
+  if (!fmt || dataOffset === -1) return null;
+
+  const bytesPerSample = fmt.bitsPerSample / 8;
+  const frameCount = Math.floor(dataLength / (bytesPerSample * fmt.numChannels));
+  const audioBuffer = createVirtualAudioBuffer(fmt.numChannels, frameCount, fmt.sampleRate);
+
+  /**
+   * Performs the for operation.
+   *
+   * @param {*} [let i=0; i < frameCount; i++] - Let i value.
+   *
+   * @returns {VirtualBufferSourceNode} This instance for chaining.
+   */
+  for (let i = 0; i < frameCount; i++) {
+    for (let c = 0; c < fmt.numChannels; c++) {
+      const sampleOffset = dataOffset + (i * fmt.numChannels + c) * bytesPerSample;
+      let sample = 0;
+      if (fmt.audioFormat === 3 && fmt.bitsPerSample === 32) sample = buf.readFloatLE(sampleOffset);
+      else if (fmt.bitsPerSample === 16) sample = buf.readInt16LE(sampleOffset) / 32768;
+      else if (fmt.bitsPerSample === 8) sample = (buf.readUInt8(sampleOffset) - 128) / 128;
+      else if (fmt.bitsPerSample === 32) sample = buf.readInt32LE(sampleOffset) / 2147483648;
+      audioBuffer.getChannelData(c)[i] = sample;
+    }
+  }
+  return audioBuffer;
+}
+
+/** Headless stand-in for the browser's `AudioContext`. */
+class VirtualAudioContext {
+  /**
+   * Creates a new VirtualAudioContext instance.
+   *
+   * @param {number} [sampleRate=44100] - Samplerate value.
+   */
+  constructor(sampleRate = 44100) {
+    this.sampleRate = sampleRate;
+    this.state = 'running'; // Node has no autoplay policy to enforce, so start out running
+    this._startedAt = Date.now();
+    this._elapsed = 0;
+    this.destination = new VirtualAudioNode('destination', this);
+  }
+  /**
+   * Returns elapsed audio-context time in seconds.
+   *
+   * @returns {number} The resulting value.
+   */
+  get currentTime() {
+    return this.state === 'running' ? this._elapsed + (Date.now() - this._startedAt) / 1000 : this._elapsed;
+  }
+  /**
+   * Resumes the virtual audio clock.
+   *
+   * @returns {Promise<void>} The resulting value.
+   */
+  resume() {
+    if (this.state !== 'running') { this.state = 'running'; this._startedAt = Date.now(); }
+    return Promise.resolve();
+  }
+  /**
+   * Suspends the virtual audio clock.
+   *
+   * @returns {Promise<void>} The resulting value.
+   */
+  suspend() {
+    if (this.state === 'running') { this._elapsed = this.currentTime; this.state = 'suspended'; }
+    return Promise.resolve();
+  }
+  /**
+   * Creates a virtual gain node.
+   *
+   * @returns {VirtualAudioContext} This instance for chaining.
+   */
+  createGain() { return new VirtualGainNode(this); }
+  /**
+   * Creates a virtual biquad filter node.
+   *
+   * @returns {VirtualAudioContext} This instance for chaining.
+   */
+  createBiquadFilter() { return new VirtualBiquadFilterNode(this); }
+  /**
+   * Creates a virtual delay node.
+   *
+   * @param {*} [maxDelayTime=1] - Maxdelaytime value.
+   *
+   * @returns {VirtualAudioContext} This instance for chaining.
+   */
+  createDelay(maxDelayTime = 1) { return new VirtualDelayNode(this, maxDelayTime); }
+  /**
+   * Creates a virtual stereo panner node.
+   *
+   * @returns {VirtualAudioContext} This instance for chaining.
+   */
+  createStereoPanner() { return new VirtualStereoPannerNode(this); }
+  /**
+   * Creates a virtual 3D panner node.
+   *
+   * @returns {VirtualAudioContext} This instance for chaining.
+   */
+  createPanner() { return new VirtualPannerNode(this); }
+  /**
+   * Creates a virtual convolution node.
+   *
+   * @returns {VirtualAudioContext} This instance for chaining.
+   */
+  createConvolver() { return new VirtualConvolverNode(this); }
+  /**
+   * Creates a virtual analyser node.
+   *
+   * @returns {VirtualAudioContext} This instance for chaining.
+   */
+  createAnalyser() { return new VirtualAnalyserNode(this); }
+  /**
+   * Creates a virtual oscillator node.
+   *
+   * @returns {VirtualAudioContext} This instance for chaining.
+   */
+  createOscillator() { return new VirtualOscillatorNode(this); }
+  /**
+   * Creates a virtual audio-buffer source.
+   *
+   * @returns {VirtualAudioContext} This instance for chaining.
+   */
+  createBufferSource() { return new VirtualBufferSourceNode(this); }
+  /**
+   * Creates a virtual audio buffer.
+   *
+   * @param {number} numberOfChannels - Numberofchannels value.
+   * @param {number} length - Length value.
+   * @param {number} sampleRate - Samplerate value.
+   *
+   * @returns {VirtualAudioContext} This instance for chaining.
+   */
+  createBuffer(numberOfChannels, length, sampleRate) {
+    return createVirtualAudioBuffer(numberOfChannels, length, sampleRate || this.sampleRate);
+  }
+  /**
+   * Asynchronously decodes supported audio bytes.
+   *
+   * @param {Buffer|ArrayBuffer|*} data - Data value.
+   *
+   * @throws {Error} If the data is not a supported uncompressed PCM WAV file.
+   *
+   * @returns {Promise<Object>} The resulting value.
+   */
+  decodeAudioData(data) {
+    return new Promise((resolve, reject) => {
+      try {
+        const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+        const decoded = decodeWav(buf);
+        if (!decoded) {
+          reject(new Error('decodeAudioData(): only uncompressed PCM WAV can be decoded in this headless engine (no mp3/ogg/etc. codec support in Node).'));
+          return;
+        }
+        resolve(decoded);
+      } catch (error) { reject(error); }
+    });
+  }
+}
+
+// =============================================================================
+// Shared context + global functions
+// =============================================================================
 
 let sharedContext = null;
 
 /**
- * Get the window's audio context, creating a shared one (lazily, on first
- * use) if none has been set yet. Every class below defaults to this
- * context unless one is explicitly passed to its constructor.
+ * Returns the shared audio context, creating it lazily.
  *
- * @returns {AudioContext} The shared `AudioContext`.
- * @throws {Error} If no `AudioContext`/`webkitAudioContext` implementation is available.
+ * @returns {VirtualAudioContext} This instance for chaining.
  */
 function getAudioContext() {
-    if (sharedContext) return sharedContext;
-    const Ctx = (typeof AudioContext !== 'undefined' && AudioContext)
-        || (typeof root !== 'undefined' && root.webkitAudioContext);
-    const Impl = Ctx || (typeof globalThis !== 'undefined' && (globalThis.AudioContext || globalThis.webkitAudioContext));
-    if (!Impl) throw new Error('getAudioContext() requires a browser AudioContext implementation.');
-    sharedContext = new Impl();
-    return sharedContext;
+  /**
+   * Performs the if operation.
+   *
+   * @param {*} !sharedContext - !sharedcontext value.
+   *
+   * @returns {VirtualAudioContext} This instance for chaining.
+   */
+  if (!sharedContext) sharedContext = new VirtualAudioContext();
+  return sharedContext;
 }
 
 /**
- * Sets the AudioContext to a specified context, to enable cross-library
- * compatibility (e.g. sharing one `AudioContext` with another audio
- * library on the same page). All classes below created afterwards default
- * to this context.
+ * Replaces the shared audio context.
  *
- * @param {AudioContext} context - The `AudioContext` to use from now on.
- * @returns {void}
+ * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+ *
+ * @returns {void} The resulting value.
  */
-function setAudioContext(context) {
-    sharedContext = context;
-}
+function setAudioContext(context) { sharedContext = context; }
 
 /**
- * Starts audio processing in the window. Must be called from a user
- * interaction (e.g. inside a `mousePressed()` handler) - browsers block
- * audio from starting on its own to avoid autoplaying sound. Resumes the
- * shared (or given) `AudioContext` immediately, and, if it's still
- * suspended afterwards (i.e. this wasn't actually called from a trusted
- * user gesture), attaches one-time listeners to `elements` that retry on
- * the next tap/click/keypress.
+ * Resumes audio processing and invokes an optional callback.
  *
- * @param {HTMLElement|HTMLElement[]} [elements=document] - Element(s) to listen on for the unlocking gesture.
- * @param {function():void} [callback] - Called once the context successfully resumes.
- * @param {AudioContext} [context] - Context to start. Defaults to {@link getAudioContext}.
- * @returns {Promise<void>} Resolves once the context is running.
+ * @param {*} elements - Elements value.
+ * @param {Function} callback - Callback value.
+ * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+ *
+ * @returns {Promise<void>} The resulting value.
  */
 function userStartAudio(elements, callback, context) {
-    const ctx = context || getAudioContext();
-
-    return new Promise((resolve) => {
-        const tryResume = () => ctx.resume().then(() => {
-            if (ctx.state === 'running') {
-                cleanup();
-                if (callback) callback();
-                resolve();
-            }
-        });
-
-        const targets = elements === undefined ? [document]
-            : Array.isArray(elements) ? elements
-            : (elements.length !== undefined && !(elements instanceof HTMLElement)) ? Array.from(elements)
-            : [elements];
-        const gestureEvents = ['touchend', 'mouseup', 'keydown'];
-
-        const cleanup = () => {
-            for (const target of targets) {
-                for (const event of gestureEvents) target.removeEventListener(event, tryResume);
-            }
-        };
-
-        tryResume().then(() => {
-            if (ctx.state !== 'running') {
-                for (const target of targets) {
-                    for (const event of gestureEvents) target.addEventListener(event, tryResume);
-                }
-            }
-        });
-    });
+  const ctx = context || getAudioContext();
+  return ctx.resume().then(() => { if (callback) callback(); });
 }
 
 /**
- * Stops audio processing in the browser window by suspending the
- * `AudioContext`. Playback can be resumed with {@link userStartAudio}.
+ * Suspends audio processing.
  *
- * @param {AudioContext} [context] - Context to stop. Defaults to {@link getAudioContext}.
- * @returns {Promise<void>} Resolves once the context is suspended.
+ * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+ *
+ * @returns {Promise<void>} The resulting value.
  */
 function userStopAudio(context) {
-    const ctx = context || getAudioContext();
-    return ctx.suspend();
+  const ctx = context || getAudioContext();
+  return ctx.suspend();
 }
 
-// ---------------------------------------------------------------
-// SoundNode - base class for every audio-producing/-processing object
-// ---------------------------------------------------------------
+// =============================================================================
+// SoundNode / SoundSource / SoundMixEffect — base classes
+// =============================================================================
 
 /**
  * Base class underlying every other class in this file. Wraps a single
- * `.output` `GainNode` (used so `amp()`/`connect()`/`disconnect()` behave
+ * `.output` gain node (used so `amp()`/`connect()`/`disconnect()` behave
  * uniformly regardless of what a subclass does internally), and forwards
- * `getNode()` to whatever native Web Audio node subclasses consider their
- * "primary" one.
- *
- * @class
+ * `getNode()` to whatever node subclasses consider their "primary" one.
  */
 class SoundNode {
-    /**
-     * @param {AudioContext} [context] - Audio context to build nodes on. Defaults to {@link getAudioContext}.
-     */
-    constructor(context) {
-        /** @type {AudioContext} */
-        this.ctx = context || getAudioContext();
-        /** @type {GainNode} This node's output - what `connect()` connects onward. */
-        this.output = this.ctx.createGain();
-    }
+  /**
+   * Creates a new SoundNode instance.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(context) {
+    this.ctx = context || getAudioContext();
+    /** @type {VirtualGainNode} This node's output — what `connect()` connects onward. */
+    this.output = this.ctx.createGain();
+  }
 
-    /**
-     * Adjust the amplitude (volume) of this node's output.
-     *
-     * @param {number} vol - Target amplitude, generally `0`-`1`.
-     * @param {number} [rampTime=0] - Time, in seconds, to smoothly ramp to `vol`. `0` changes immediately.
-     * @param {number} [tFromNow=0] - Delay, in seconds, before the ramp starts.
-     * @returns {SoundNode} This instance, to allow chaining.
-     */
-    amp(vol, rampTime = 0, tFromNow = 0) {
-        const now = this.ctx.currentTime;
-        const startTime = now + tFromNow;
-        const param = this.output.gain;
-        param.cancelScheduledValues(startTime);
-        if (rampTime > 0) {
-            param.setValueAtTime(param.value, startTime);
-            param.linearRampToValueAtTime(vol, startTime + rampTime);
-        } else {
-            param.setValueAtTime(vol, startTime);
-        }
-        return this;
+  /**
+   * Sets or ramps output amplitude.
+   *
+   * @param {number} vol - Vol value.
+   * @param {number} [rampTime=0] - Ramptime value.
+   * @param {number} [tFromNow=0] - Tfromnow value.
+   *
+   * @returns {SoundNode} This instance for chaining.
+   */
+  amp(vol, rampTime = 0, tFromNow = 0) {
+    const now = this.ctx.currentTime;
+    const startTime = now + tFromNow;
+    const param = this.output.gain;
+    param.cancelScheduledValues(startTime);
+    if (rampTime > 0) {
+      param.setValueAtTime(param.value, startTime);
+      param.linearRampToValueAtTime(vol, startTime + rampTime);
+    } else {
+      param.setValueAtTime(vol, startTime);
     }
+    return this;
+  }
 
-    /**
-     * Connects this node's output to another audio destination.
-     *
-     * @param {SoundNode|AudioNode|AudioParam} [unit] - Destination to connect to. Defaults to the context's speaker output (`ctx.destination`).
-     * @returns {SoundNode} This instance, to allow chaining.
-     */
-    connect(unit) {
-        const target = unit === undefined ? this.ctx.destination
-            : unit instanceof SoundNode ? (unit.getInputNode ? unit.getInputNode() : unit.output)
-            : unit;
-        this.output.connect(target);
-        return this;
-    }
+  /**
+   * Connects this audio node to a destination.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} unit - Unit value.
+   *
+   * @returns {*} The resulting value.
+   */
+  connect(unit) {
+    const target = unit === undefined ? this.ctx.destination
+      : unit instanceof SoundNode ? unit.getInputNode()
+      : unit;
+    this.output.connect(target);
+    return this;
+  }
 
-    /**
-     * Disconnects this node's output from everything downstream, silencing
-     * it without stopping/destroying it.
-     *
-     * @returns {SoundNode} This instance, to allow chaining.
-     */
-    disconnect() {
-        this.output.disconnect();
-        return this;
-    }
+  /**
+   * Disconnects one or all outgoing audio connections.
+   *
+   * @returns {SoundNode} This instance for chaining.
+   */
+  disconnect() { this.output.disconnect(); return this; }
 
-    /**
-     * A private-ish function called when another node tries to connect
-     * *into* this one via `.setInput()`/`.connect()` - returns whichever
-     * native node incoming audio should actually be wired to (which isn't
-     * always `.output`; e.g. an effect's dry/wet input is upstream of its
-     * output). Subclasses that receive audio (effects, `Amplitude`, `FFT`)
-     * override this; sources (which have nothing upstream) don't need to.
-     *
-     * @returns {AudioNode} The node other nodes should connect *into*.
-     */
-    getInputNode() {
-        return this.output;
-    }
+  /**
+   * Returns the node that accepts incoming audio.
+   *
+   * @returns {SoundNode} This instance for chaining.
+   */
+  getInputNode() { return this.output; }
 
-    /**
-     * Returns the underlying native Web Audio node this object wraps -
-     * `.output` by default, or whatever a subclass considers its primary
-     * node (e.g. the `BiquadFilterNode` inside a {@link Biquad}).
-     *
-     * @returns {AudioNode} The primary native node.
-     */
-    getNode() {
-        return this.output;
-    }
+  /**
+   * Returns the primary wrapped audio node.
+   *
+   * @returns {SoundNode} This instance for chaining.
+   */
+  getNode() { return this.output; }
 
-    /**
-     * Connect an audio source into this node, so it becomes (part of) this
-     * node's input signal. The base implementation just connects `source`
-     * to {@link SoundNode#getInputNode}; subclasses with a more
-     * specific/well-known input (dry/wet effects, `Amplitude`, `FFT`,
-     * `Envelope`) override this to route into the right place.
-     *
-     * @param {SoundNode|AudioNode} source - Source to connect in.
-     * @returns {SoundNode} This instance, to allow chaining.
-     */
-    setInput(source) {
-        const node = source instanceof SoundNode ? source.output : source;
-        node.connect(this.getInputNode());
-        return this;
-    }
+  /**
+   * Connects a source to this node’s input.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} source - Source value.
+   *
+   * @returns {SoundNode} This instance for chaining.
+   */
+  setInput(source) {
+    const node = source instanceof SoundNode ? source.output : source;
+    node.connect(this.getInputNode());
+    return this;
+  }
 }
 
-// ---------------------------------------------------------------
-// SoundSource - base class for things that generate sound
-// ---------------------------------------------------------------
-
-/**
- * Base class for sound *sources* - things that generate audio rather than
- * process it (oscillators, sound files, noise, microphone input). Adds
- * `start()`/`stop()`, which subclasses must implement.
- *
- * @class
- * @extends SoundNode
- */
+/** Base class for sound *sources* — oscillators, sound files, noise. Adds `start()`/`stop()`. */
 class SoundSource extends SoundNode {
-    constructor(context) {
-        super(context);
-        /** @type {boolean} Whether this source is currently producing sound. */
-        this.started = false;
-    }
-
-    /**
-     * Starts the p5 sound source. Must be overridden by subclasses.
-     *
-     * @abstract
-     * @param {number} [time=0] - Delay, in seconds, before starting.
-     * @returns {SoundSource} This instance, to allow chaining.
-     */
-    start(time = 0) {
-        throw new Error('start() must be implemented by SoundSource subclasses.');
-    }
-
-    /**
-     * Stops the p5 sound source. Must be overridden by subclasses.
-     *
-     * @abstract
-     * @param {number} [time=0] - Delay, in seconds, before stopping.
-     * @returns {SoundSource} This instance, to allow chaining.
-     */
-    stop(time = 0) {
-        throw new Error('stop() must be implemented by SoundSource subclasses.');
-    }
+  /**
+   * Creates a new SoundSource instance.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(context) {
+    super(context);
+    /** @type {boolean} */
+    this.started = false;
+  }
+  /**
+   * Starts or schedules the audio source.
+   *
+   * @throws {Error} When invoked on an abstract source or unavailable headless input.
+   *
+   * @returns {SoundSource} This instance for chaining.
+   */
+  start() { throw new Error('start() must be implemented by SoundSource subclasses.'); }
+  /**
+   * Stops or schedules the audio source.
+   *
+   * @returns {SoundSource} This instance for chaining.
+   */
+  stop() { throw new Error('stop() must be implemented by SoundSource subclasses.'); }
 }
 
-// ---------------------------------------------------------------
-// SoundMixEffect - base class for dry/wet effects
-// ---------------------------------------------------------------
-
-/**
- * Base class for effects with a dry/wet mix (filters, delay, reverb).
- * Internally splits incoming audio into a dry path (straight to
- * `.output`) and a wet path (through `this.effectNode`, which subclasses
- * set up in their constructor), and crossfades between them via
- * {@link SoundMixEffect#wet}.
- *
- * @class
- * @extends SoundNode
- */
+/** Base class for effects with a dry/wet mix (filters, delay, reverb). */
 class SoundMixEffect extends SoundNode {
-    constructor(context) {
-        super(context);
-        /** @type {GainNode} Entry point - what `setInput()`/`connect()`-into wires up to. */
-        this.input = this.ctx.createGain();
-        /** @type {GainNode} */
-        this.dryGain = this.ctx.createGain();
-        /** @type {GainNode} */
-        this.wetGain = this.ctx.createGain();
-        /**
-         * The subclass's actual effect node (`BiquadFilterNode`,
-         * `DelayNode`, `ConvolverNode`, ...) - assigned by the subclass
-         * constructor, then wired into the wet path by
-         * {@link SoundMixEffect#_routeEffect}.
-         * @type {?AudioNode}
-         */
-        this.effectNode = null;
+  /**
+   * Creates a new SoundMixEffect instance.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(context) {
+    super(context);
+    this.input = this.ctx.createGain();
+    this.dryGain = this.ctx.createGain();
+    this.wetGain = this.ctx.createGain();
+    /** @type {?VirtualAudioNode} Set by the subclass constructor, then wired in by `_routeEffect()`. */
+    this.effectNode = null;
 
-        this.input.connect(this.dryGain);
-        this.dryGain.connect(this.output);
-        this.wetGain.connect(this.output);
+    this.input.connect(this.dryGain);
+    this.dryGain.connect(this.output);
+    this.wetGain.connect(this.output);
 
-        // Fully wet by default - matches p5.sound's effects, which are
-        // meant to be heard until dialed back with wet().
-        this.dryGain.gain.value = 0;
-        this.wetGain.gain.value = 1;
-    }
+    this.dryGain.gain.value = 0;
+    this.wetGain.gain.value = 1;
+  }
 
-    /**
-     * Wires up `this.effectNode` (which the subclass must have already
-     * created) into the wet signal path: `input -> effectNode -> wetGain`.
-     * Called once by each subclass's constructor, after it creates
-     * `this.effectNode`.
-     *
-     * @protected
-     * @returns {void}
-     */
-    _routeEffect() {
-        this.input.connect(this.effectNode);
-        this.effectNode.connect(this.wetGain);
-    }
+  /**
+   * Connects the wet-effect signal path.
+   *
+   * @returns {void} The resulting value.
+   */
+  _routeEffect() {
+    this.input.connect(this.effectNode);
+    this.effectNode.connect(this.wetGain);
+  }
 
-    /** @override */
-    getInputNode() {
-        return this.input;
-    }
+  /**
+   * Returns the node that accepts incoming audio.
+   *
+   * @returns {SoundMixEffect} This instance for chaining.
+   */
+  getInputNode() { return this.input; }
 
-    /**
-     * Adjusts the balance between the source node's original (dry) and
-     * effected (wet) signal.
-     *
-     * @param {number} amount - `0` (fully dry/bypassed) to `1` (fully wet/effected).
-     * @returns {SoundMixEffect} This instance, to allow chaining.
-     */
-    wet(amount) {
-        const now = this.ctx.currentTime;
-        this.wetGain.gain.setValueAtTime(amount, now);
-        this.dryGain.gain.setValueAtTime(1 - amount, now);
-        return this;
-    }
+  /**
+   * Sets the dry/wet effect balance.
+   *
+   * @param {number} amount - Amount value.
+   *
+   * @returns {SoundMixEffect} This instance for chaining.
+   */
+  wet(amount) {
+    const now = this.ctx.currentTime;
+    this.wetGain.gain.setValueAtTime(amount, now);
+    this.dryGain.gain.setValueAtTime(1 - amount, now);
+    return this;
+  }
 }
 
-// ---------------------------------------------------------------
-// Gain - the plainest possible SoundNode
-// ---------------------------------------------------------------
+// =============================================================================
+// Gain
+// =============================================================================
 
-/**
- * A single, bare gain node - useful as a lightweight submixer to route
- * several sources into (via `setInput()`) and control together (via
- * `amp()`).
- *
- * @class
- * @extends SoundNode
- */
+/** A single, bare gain node — a lightweight submixer for routing several sources together. */
 class Gain extends SoundNode {}
 
-// ---------------------------------------------------------------
-// Panner (stereo) / Panner3D
-// ---------------------------------------------------------------
+// =============================================================================
+// Panner / Panner3D
+// =============================================================================
 
-/**
- * Stereo panner - positions a sound source left/right in the stereo field.
- *
- * @class
- * @extends SoundNode
- */
+/** Stereo panner — positions a sound source left/right in the stereo field. */
 class Panner extends SoundNode {
-    constructor(context) {
-        super(context);
-        this._panner = this.ctx.createStereoPanner();
-        this.output.connect === undefined; // no-op guard for older linters; real wiring below
-        this._panner.connect(this.output);
-    }
+  /**
+   * Creates a new Panner instance.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(context) {
+    super(context);
+    this._panner = this.ctx.createStereoPanner();
+    this._panner.connect(this.output);
+  }
+  /**
+   * Returns the node that accepts incoming audio.
+   *
+   * @returns {Panner} This instance for chaining.
+   */
+  getInputNode() { return this._panner; }
+  /**
+   * Returns the primary wrapped audio node.
+   *
+   * @returns {Panner} This instance for chaining.
+   */
+  getNode() { return this._panner; }
 
-    /** @override */
-    getInputNode() { return this._panner; }
-    /** @override */
-    getNode() { return this._panner; }
-
-    /**
-     * Pan a sound source left or right.
-     *
-     * @param {number} value - Pan position, from `-1` (fully left) to `1` (fully right).
-     * @param {number} [rampTime=0] - Time, in seconds, to smoothly ramp to `value`.
-     * @returns {Panner} This instance, to allow chaining.
-     */
-    pan(value, rampTime = 0) {
-        const now = this.ctx.currentTime;
-        const param = this._panner.pan;
-        param.cancelScheduledValues(now);
-        if (rampTime > 0) {
-            param.setValueAtTime(param.value, now);
-            param.linearRampToValueAtTime(value, now + rampTime);
-        } else {
-            param.setValueAtTime(value, now);
-        }
-        return this;
+  /**
+   * Sets or ramps stereo position.
+   *
+   * @param {*} value - Value value.
+   * @param {number} [rampTime=0] - Ramptime value.
+   *
+   * @returns {Panner} This instance for chaining.
+   */
+  pan(value, rampTime = 0) {
+    const now = this.ctx.currentTime;
+    const param = this._panner.pan;
+    param.cancelScheduledValues(now);
+    if (rampTime > 0) {
+      param.setValueAtTime(param.value, now);
+      param.linearRampToValueAtTime(value, now + rampTime);
+    } else {
+      param.setValueAtTime(value, now);
     }
+    return this;
+  }
 }
 
-/**
- * 3D (HRTF) panner - positions a sound source anywhere in 3D space around
- * the listener.
- *
- * @class
- * @extends SoundNode
- */
+/** 3D panner — positions a sound source anywhere in 3D space around the listener. */
 class Panner3D extends SoundNode {
-    constructor(context) {
-        super(context);
-        this._panner = this.ctx.createPanner();
-        this._panner.panningModel = 'HRTF';
-        this._panner.distanceModel = 'linear';
-        this._panner.connect(this.output);
-    }
+  /**
+   * Creates a new Panner3D instance.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(context) {
+    super(context);
+    this._panner = this.ctx.createPanner();
+    this._panner.connect(this.output);
+  }
+  /**
+   * Returns the node that accepts incoming audio.
+   *
+   * @returns {Panner3D} This instance for chaining.
+   */
+  getInputNode() { return this._panner; }
+  /**
+   * Returns the primary wrapped audio node.
+   *
+   * @returns {Panner3D} This instance for chaining.
+   */
+  getNode() { return this._panner; }
 
-    /** @override */
-    getInputNode() { return this._panner; }
-    /** @override */
-    getNode() { return this._panner; }
+  /**
+   * Connects and configures an effect input.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} source - Source value.
+   *
+   * @returns {Panner3D} This instance for chaining.
+   */
+  process(source) { return this.setInput(source); }
 
-    /**
-     * Connects an input source to the 3D panner - equivalent to
-     * `setInput()`, provided under the name p5.sound uses for this class.
-     *
-     * @param {SoundNode|AudioNode} source - Source to connect in.
-     * @returns {Panner3D} This instance, to allow chaining.
-     */
-    process(source) {
-        return this.setInput(source);
-    }
+  /**
+   * Gets or sets the 3D panner X coordinate.
+   *
+   * @param {*} value - Value value.
+   *
+   * @returns {Panner3D} This instance for chaining.
+   */
+  positionX(value) { return this._axis('positionX', value); }
+  /**
+   * Gets or sets the 3D panner Y coordinate.
+   *
+   * @param {*} value - Value value.
+   *
+   * @returns {Panner3D} This instance for chaining.
+   */
+  positionY(value) { return this._axis('positionY', value); }
+  /**
+   * Gets or sets the 3D panner Z coordinate.
+   *
+   * @param {*} value - Value value.
+   *
+   * @returns {Panner3D} This instance for chaining.
+   */
+  positionZ(value) { return this._axis('positionZ', value); }
 
-    /** @param {number} [value] - New X position. @returns {Panner3D|number} This instance when setting, or the current X position when reading. */
-    positionX(value) { return this._axis('positionX', 'setPosition', 0, value); }
-    /** @param {number} [value] - New Y position. @returns {Panner3D|number} This instance when setting, or the current Y position when reading. */
-    positionY(value) { return this._axis('positionY', 'setPosition', 1, value); }
-    /** @param {number} [value] - New Z position. @returns {Panner3D|number} This instance when setting, or the current Z position when reading. */
-    positionZ(value) { return this._axis('positionZ', 'setPosition', 2, value); }
+  /**
+   * Updates the object’s primary configuration values.
+   *
+   * @param {number} [x=0] - X value.
+   * @param {number} [y=0] - Y value.
+   * @param {number} [z=0] - Z value.
+   *
+   * @returns {Panner3D} This instance for chaining.
+   */
+  set(x = 0, y = 0, z = 0) {
+    const now = this.ctx.currentTime;
+    this._panner.positionX.setValueAtTime(x, now);
+    this._panner.positionY.setValueAtTime(y, now);
+    this._panner.positionZ.setValueAtTime(z, now);
+    return this;
+  }
 
-    /**
-     * Set the x, y, and z position of the 3D panner, in one call.
-     *
-     * @param {number} [x=0] - X position.
-     * @param {number} [y=0] - Y position.
-     * @param {number} [z=0] - Z position.
-     * @returns {Panner3D} This instance, to allow chaining.
-     */
-    set(x = 0, y = 0, z = 0) {
-        if (this._panner.positionX) {
-            const now = this.ctx.currentTime;
-            this._panner.positionX.setValueAtTime(x, now);
-            this._panner.positionY.setValueAtTime(y, now);
-            this._panner.positionZ.setValueAtTime(z, now);
-        } else {
-            this._panner.setPosition(x, y, z);
-        }
-        return this;
-    }
+  /**
+   * Sets the maximum panning distance.
+   *
+   * @param {number} distance - Distance value.
+   *
+   * @returns {Panner3D} This instance for chaining.
+   */
+  maxDist(distance) { this._panner.maxDistance = distance; return this; }
 
-    /**
-     * Set the maximum distance of the panner - beyond this, the sound is
-     * clamped to its quietest (per `distanceModel`).
-     *
-     * @param {number} distance - Maximum distance.
-     * @returns {Panner3D} This instance, to allow chaining.
-     */
-    maxDist(distance) { this._panner.maxDistance = distance; return this; }
+  /**
+   * Sets the distance attenuation rate.
+   *
+   * @param {number} rate - Rate value.
+   *
+   * @returns {Panner3D} This instance for chaining.
+   */
+  rolloff(rate) { this._panner.rolloffFactor = rate; return this; }
 
-    /**
-     * Set the rolloff rate of the panner - how quickly volume falls off
-     * with distance.
-     *
-     * @param {number} rate - Rolloff factor.
-     * @returns {Panner3D} This instance, to allow chaining.
-     */
-    rolloff(rate) { this._panner.rolloffFactor = rate; return this; }
+  /**
+   * Sets the distance model and attenuation rate.
+   *
+   * @param {number} rate - Rate value.
+   * @param {string} [model='linear'] - Model value.
+   *
+   * @returns {Panner3D} This instance for chaining.
+   */
+  setFalloff(rate, model = 'linear') {
+    this._panner.distanceModel = model;
+    return this.rolloff(rate);
+  }
 
-    /**
-     * The rolloff rate of the panner, alongside its distance model - a
-     * convenience for setting `rolloff()` and `distanceModel` together.
-     *
-     * @param {number} rate - Rolloff factor.
-     * @param {'linear'|'inverse'|'exponential'} [model='linear'] - Distance model to fall off by.
-     * @returns {Panner3D} This instance, to allow chaining.
-     */
-    setFalloff(rate, model = 'linear') {
-        this._panner.distanceModel = model;
-        return this.rolloff(rate);
-    }
-
-    /**
-     * @private
-     * @param {string} paramName - `AudioParam` name to prefer (`'positionX'`, etc.).
-     * @param {string} legacyMethod - Legacy setter to fall back to (`'setPosition'`).
-     * @param {number} axisIndex - `0`/`1`/`2` for x/y/z, used with the legacy setter.
-     * @param {number} [value] - New value, or `undefined` to read.
-     * @returns {Panner3D|number}
-     */
-    _axis(paramName, legacyMethod, axisIndex, value) {
-        if (this._panner[paramName]) {
-            if (value === undefined) return this._panner[paramName].value;
-            this._panner[paramName].setValueAtTime(value, this.ctx.currentTime);
-            return this;
-        }
-        // Older browsers only expose setPosition(x, y, z) as a single call;
-        // read/track the axes ourselves so getters still work.
-        this._legacyPosition = this._legacyPosition || [0, 0, 0];
-        if (value === undefined) return this._legacyPosition[axisIndex];
-        this._legacyPosition[axisIndex] = value;
-        this._panner.setPosition(...this._legacyPosition);
-        return this;
-    }
+  /**
+   * Gets or sets one panner-axis parameter.
+   *
+   * @param {string} paramName - Paramname value.
+   * @param {*} value - Value value.
+   *
+   * @returns {Panner3D} This instance for chaining.
+   */
+  _axis(paramName, value) {
+    if (value === undefined) return this._panner[paramName].value;
+    this._panner[paramName].setValueAtTime(value, this.ctx.currentTime);
+    return this;
+  }
 }
 
-// ---------------------------------------------------------------
+// =============================================================================
 // Amplitude
-// ---------------------------------------------------------------
+// =============================================================================
 
 /**
- * Tracks the amplitude (volume) of an audio source over time.
- *
- * @class
- * @extends SoundNode
+ * Tracks the amplitude (volume) of an audio source over time. Headless:
+ * with no real signal to measure, `getLevel()` approximates the connected
+ * source's current output level (its own gain, times whether a source is
+ * currently started) rather than sampling real audio — enough to drive
+ * game logic (level meters, reactive visuals) against synthesized sources.
  */
 class Amplitude extends SoundNode {
-    constructor(context) {
-        super(context);
-        this._analyser = this.ctx.createAnalyser();
-        this._analyser.fftSize = 1024;
-        this._data = new Float32Array(this._analyser.fftSize);
-        this._smoothing = 0;
-        this._smoothedLevel = 0;
-        this._analyser.connect(this.output);
+  /**
+   * Creates a new Amplitude instance.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(context) {
+    super(context);
+    this._analyser = this.ctx.createAnalyser();
+    this._analyser.fftSize = 1024;
+    this._smoothing = 0;
+    this._smoothedLevel = 0;
+    this._source = null;
+    this._analyser.connect(this.output);
+  }
+  /**
+   * Returns the node that accepts incoming audio.
+   *
+   * @returns {Amplitude} This instance for chaining.
+   */
+  getInputNode() { return this._analyser; }
+  /**
+   * Returns the primary wrapped audio node.
+   *
+   * @returns {Amplitude} This instance for chaining.
+   */
+  getNode() { return this._analyser; }
+
+  /**
+   * Connects a source to this node’s input.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} source - Source value.
+   *
+   * @returns {Amplitude} This instance for chaining.
+   */
+  setInput(source) {
+    this._source = source instanceof SoundNode ? source : null;
+    if (source !== undefined) {
+      const node = source instanceof SoundNode ? source.output : source;
+      node.connect(this._analyser);
     }
+    return this;
+  }
 
-    /** @override */
-    getInputNode() { return this._analyser; }
-    /** @override */
-    getNode() { return this._analyser; }
+  /**
+   * Returns the approximated current signal level.
+   *
+   * @returns {number} The resulting value.
+   */
+  getLevel() {
+    const raw = signalLevelOf(this._source);
+    this._smoothedLevel = this._smoothing * this._smoothedLevel + (1 - this._smoothing) * raw;
+    return this._smoothedLevel;
+  }
 
-    /**
-     * Connect an audio source to the amplitude object, replacing whichever
-     * source (if any) was connected before. Pass nothing to analyze the
-     * whole mix (the context's destination).
-     *
-     * @param {SoundNode|AudioNode} [source] - Source to analyze. Defaults to the master output.
-     * @returns {Amplitude} This instance, to allow chaining.
-     */
-    setInput(source) {
-        this._analyser.disconnect();
-        this._analyser.connect(this.output);
-        const node = source === undefined ? this.ctx.destination
-            : source instanceof SoundNode ? source.output : source;
-        node.connect(this._analyser);
-        return this;
-    }
-
-    /**
-     * Get the current amplitude (RMS level) value of the connected sound,
-     * smoothed per {@link Amplitude#smooth}.
-     *
-     * @returns {number} Current level, roughly `0`-`1`.
-     */
-    getLevel() {
-        this._analyser.getFloatTimeDomainData(this._data);
-        let sumSquares = 0;
-        for (const sample of this._data) sumSquares += sample * sample;
-        const rms = Math.sqrt(sumSquares / this._data.length);
-
-        this._smoothedLevel = this._smoothing * this._smoothedLevel + (1 - this._smoothing) * rms;
-        return this._smoothedLevel;
-    }
-
-    /**
-     * Sets the amount of smoothing applied between calls to
-     * {@link Amplitude#getLevel}, to even out fast fluctuations.
-     *
-     * @param {number} value - Smoothing factor, from `0` (no smoothing) to just under `1` (heavy smoothing).
-     * @returns {Amplitude} This instance, to allow chaining.
-     */
-    smooth(value) {
-        if (value === undefined) return this._smoothing;
-        this._smoothing = Math.min(0.999, Math.max(0, value));
-        return this;
-    }
+  /**
+   * Gets or sets amplitude smoothing.
+   *
+   * @param {*} value - Value value.
+   *
+   * @returns {Amplitude} This instance for chaining.
+   */
+  smooth(value) {
+    if (value === undefined) return this._smoothing;
+    this._smoothing = clamp(value, 0, 0.999);
+    return this;
+  }
 }
 
-// ---------------------------------------------------------------
+/**
+ * Estimates a node’s current output level in headless mode.
+ *
+ * @param {SoundNode|VirtualAudioNode|Object} node - Node value.
+ *
+ * @returns {number} The resulting value.
+ */
+function signalLevelOf(node) {
+  /**
+   * Performs the if operation.
+   *
+   * @param {*} !node - !node value.
+   *
+   * @returns {Amplitude} This instance for chaining.
+   */
+  if (!node) return 0;
+  const own = node.output ? node.output.gain.value : 1;
+  /**
+   * Performs the if operation.
+   *
+   * @param {*} node instanceof SoundSource - Node instanceof soundsource value.
+   *
+   * @returns {Amplitude} This instance for chaining.
+   */
+  if (node instanceof SoundSource) return node.started ? clamp(own, 0, 1) : 0;
+  return clamp(own, 0, 1);
+}
+
+// =============================================================================
 // FFT
-// ---------------------------------------------------------------
+// =============================================================================
 
-/**
- * Analyzes the frequency spectrum and waveform of an audio source.
- *
- * @class
- * @extends SoundNode
- */
+/** Analyzes the frequency spectrum and waveform of an audio source. */
 class FFT extends SoundNode {
-    /**
-     * @param {number} [smoothing=0.8] - `AnalyserNode.smoothingTimeConstant` for frequency analysis.
-     * @param {number} [bins=1024] - Number of frequency bins - must be a power of 2; `fftSize` is set to `bins * 2`.
-     * @param {AudioContext} [context]
-     */
-    constructor(smoothing = 0.8, bins = 1024, context) {
-        super(context);
-        this._analyser = this.ctx.createAnalyser();
-        this._analyser.fftSize = bins * 2;
-        this._analyser.smoothingTimeConstant = smoothing;
-        this._analyser.connect(this.output);
-    }
+  /**
+   * Creates a new FFT instance.
+   *
+   * @param {number} [smoothing=0.8] - Smoothing value.
+   * @param {number} [bins=1024] - Bins value.
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(smoothing = 0.8, bins = 1024, context) {
+    super(context);
+    this._analyser = this.ctx.createAnalyser();
+    this._analyser.fftSize = bins * 2;
+    this._analyser.smoothingTimeConstant = smoothing;
+    this._analyser.connect(this.output);
+  }
+  /**
+   * Returns the node that accepts incoming audio.
+   *
+   * @returns {FFT} This instance for chaining.
+   */
+  getInputNode() { return this._analyser; }
+  /**
+   * Returns the primary wrapped audio node.
+   *
+   * @returns {FFT} This instance for chaining.
+   */
+  getNode() { return this._analyser; }
 
-    /** @override */
-    getInputNode() { return this._analyser; }
-    /** @override */
-    getNode() { return this._analyser; }
-
-    /**
-     * Connects an audio source for this FFT to analyze, replacing any
-     * previous one. Pass nothing to analyze the whole mix.
-     *
-     * @param {SoundNode|AudioNode} [source] - Source to analyze. Defaults to the master output.
-     * @returns {FFT} This instance, to allow chaining.
-     */
-    setInput(source) {
-        this._analyser.disconnect();
-        this._analyser.connect(this.output);
-        const node = source === undefined ? this.ctx.destination
-            : source instanceof SoundNode ? source.output : source;
-        node.connect(this._analyser);
-        return this;
+  /**
+   * Connects a source to this node’s input.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} source - Source value.
+   *
+   * @returns {FFT} This instance for chaining.
+   */
+  setInput(source) {
+    if (source !== undefined) {
+      const node = source instanceof SoundNode ? source.output : source;
+      node.connect(this._analyser);
     }
+    return this;
+  }
 
-    /**
-     * Returns the frequency spectrum of the input signal.
-     *
-     * @param {number} [bins] - Number of bins to return (resizes `fftSize` to `bins * 2` if given).
-     * @param {'db'|'byte'} [scale='byte'] - `'byte'` returns `0`-`255` values; `'db'` returns raw decibel values.
-     * @returns {number[]} Frequency-domain amplitude values, lowest to highest frequency.
-     */
-    analyze(bins, scale = 'byte') {
-        if (bins) this._analyser.fftSize = bins * 2;
-        if (scale === 'db') {
-            const data = new Float32Array(this._analyser.frequencyBinCount);
-            this._analyser.getFloatFrequencyData(data);
-            return Array.from(data);
-        }
-        const data = new Uint8Array(this._analyser.frequencyBinCount);
-        this._analyser.getByteFrequencyData(data);
-        return Array.from(data);
+  /**
+   * Returns frequency-domain values from the analyser.
+   *
+   * @param {number} bins - Bins value.
+   * @param {*} [scale='byte'] - Scale value.
+   *
+   * @returns {number[]} The resulting value.
+   */
+  analyze(bins, scale = 'byte') {
+    if (bins) this._analyser.fftSize = bins * 2;
+    if (scale === 'db') {
+      const data = new Float32Array(this._analyser.frequencyBinCount);
+      this._analyser.getFloatFrequencyData(data);
+      return Array.from(data);
     }
+    const data = new Uint8Array(this._analyser.frequencyBinCount);
+    this._analyser.getByteFrequencyData(data);
+    return Array.from(data);
+  }
 
-    /**
-     * Returns an array of sample values from the input audio (a
-     * time-domain "oscilloscope" view).
-     *
-     * @param {number} [bins] - Number of samples to return (resizes `fftSize` to `bins * 2` if given).
-     * @param {'float'|'byte'} [precision='float'] - `'float'` returns `-1`-`1` values; `'byte'` returns `0`-`255` values.
-     * @returns {number[]} Time-domain sample values.
-     */
-    waveform(bins, precision = 'float') {
-        if (bins) this._analyser.fftSize = bins * 2;
-        if (precision === 'byte') {
-            const data = new Uint8Array(this._analyser.fftSize);
-            this._analyser.getByteTimeDomainData(data);
-            return Array.from(data);
-        }
-        const data = new Float32Array(this._analyser.fftSize);
-        this._analyser.getFloatTimeDomainData(data);
-        return Array.from(data);
+  /**
+   * Returns time-domain sample values from the analyser.
+   *
+   * @param {number} bins - Bins value.
+   * @param {*} [precision='float'] - Precision value.
+   *
+   * @returns {number[]} The resulting value.
+   */
+  waveform(bins, precision = 'float') {
+    if (bins) this._analyser.fftSize = bins * 2;
+    if (precision === 'byte') {
+      const data = new Uint8Array(this._analyser.fftSize);
+      this._analyser.getByteTimeDomainData(data);
+      return Array.from(data);
     }
+    const data = new Float32Array(this._analyser.fftSize);
+    this._analyser.getFloatTimeDomainData(data);
+    return Array.from(data);
+  }
 }
 
-// ---------------------------------------------------------------
+// =============================================================================
 // Biquad filter family
-// ---------------------------------------------------------------
+// =============================================================================
 
-/**
- * Generic biquad filter effect (lowpass/highpass/bandpass/...).
- *
- * @class
- * @extends SoundMixEffect
- */
+/** Generic biquad filter effect (lowpass/highpass/bandpass/...). */
 class Biquad extends SoundMixEffect {
-    /**
-     * @param {BiquadFilterType} [type='lowpass'] - Filter type.
-     * @param {AudioContext} [context]
-     */
-    constructor(type = 'lowpass', context) {
-        super(context);
-        this.effectNode = this.ctx.createBiquadFilter();
-        this.effectNode.type = type;
-        this._routeEffect();
+  /**
+   * Creates a new Biquad instance.
+   *
+   * @param {string} [type='lowpass'] - Type value.
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(type = 'lowpass', context) {
+    super(context);
+    this.effectNode = this.ctx.createBiquadFilter();
+    this.effectNode.type = type;
+    this._routeEffect();
+  }
+
+  /**
+   * Gets or sets frequency.
+   *
+   * @param {*} value - Value value.
+   * @param {number} [rampTime=0] - Ramptime value.
+   *
+   * @returns {Biquad} This instance for chaining.
+   */
+  freq(value, rampTime = 0) { return this._setParam(this.effectNode.frequency, value, rampTime); }
+
+  /**
+   * Sets filter gain.
+   *
+   * @param {*} value - Value value.
+   *
+   * @returns {Biquad} This instance for chaining.
+   */
+  gain(value) { return this._setParam(this.effectNode.gain, value, 0); }
+
+  /**
+   * Sets filter resonance or bandwidth.
+   *
+   * @param {*} value - Value value.
+   *
+   * @returns {Biquad} This instance for chaining.
+   */
+  res(value) { return this._setParam(this.effectNode.Q, value, 0); }
+
+  /**
+   * Sets the oscillator, noise, or filter type.
+   *
+   * @param {string} type - Type value.
+   *
+   * @returns {Biquad} This instance for chaining.
+   */
+  setType(type) { this.effectNode.type = type; return this; }
+
+  /**
+   * Sets or ramps an audio parameter.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} param - Param value.
+   * @param {*} value - Value value.
+   * @param {number} rampTime - Ramptime value.
+   *
+   * @returns {Biquad} This instance for chaining.
+   */
+  _setParam(param, value, rampTime) {
+    const now = this.ctx.currentTime;
+    param.cancelScheduledValues(now);
+    if (rampTime > 0) {
+      param.setValueAtTime(param.value, now);
+      param.linearRampToValueAtTime(value, now + rampTime);
+    } else {
+      param.setValueAtTime(value, now);
     }
-
-    /**
-     * Set the cutoff frequency of the filter.
-     *
-     * @param {number} value - Frequency, in Hz.
-     * @param {number} [rampTime=0] - Time, in seconds, to smoothly ramp to `value`.
-     * @returns {Biquad} This instance, to allow chaining.
-     */
-    freq(value, rampTime = 0) { return this._setParam(this.effectNode.frequency, value, rampTime); }
-
-    /**
-     * The gain of the filter, in dB - only meaningful for `'lowshelf'`,
-     * `'highshelf'`, and `'peaking'` filter types.
-     *
-     * @param {number} value - Gain, in dB.
-     * @returns {Biquad} This instance, to allow chaining.
-     */
-    gain(value) { return this._setParam(this.effectNode.gain, value, 0); }
-
-    /**
-     * The filter's resonance (`Q`) factor - how sharply it emphasizes
-     * frequencies near the cutoff.
-     *
-     * @param {number} value - Resonance factor.
-     * @returns {Biquad} This instance, to allow chaining.
-     */
-    res(value) { return this._setParam(this.effectNode.Q, value, 0); }
-
-    /**
-     * Set the type of the filter.
-     *
-     * @param {BiquadFilterType} type - `'lowpass'`, `'highpass'`, `'bandpass'`, `'lowshelf'`, `'highshelf'`, `'peaking'`, `'notch'`, or `'allpass'`.
-     * @returns {Biquad} This instance, to allow chaining.
-     */
-    setType(type) { this.effectNode.type = type; return this; }
-
-    /**
-     * @private
-     * @param {AudioParam} param - Param to change.
-     * @param {number} value - New value.
-     * @param {number} rampTime - Ramp duration, in seconds.
-     * @returns {Biquad}
-     */
-    _setParam(param, value, rampTime) {
-        const now = this.ctx.currentTime;
-        param.cancelScheduledValues(now);
-        if (rampTime > 0) {
-            param.setValueAtTime(param.value, now);
-            param.linearRampToValueAtTime(value, now + rampTime);
-        } else {
-            param.setValueAtTime(value, now);
-        }
-        return this;
-    }
+    return this;
+  }
 }
 
-/** A {@link Biquad} filter preset to `'bandpass'`. @class @extends Biquad */
+/** A {@link Biquad} filter preset to `'bandpass'`. */
 class BandPass extends Biquad {
-    constructor(freq, res, context) {
-        super('bandpass', context);
-        if (freq !== undefined) this.freq(freq);
-        if (res !== undefined) this.res(res);
-    }
+  /**
+   * Creates a new BandPass instance.
+   *
+   * @param {number} freq - Freq value.
+   * @param {*} res - Res value.
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(freq, res, context) {
+    super('bandpass', context);
+    if (freq !== undefined) this.freq(freq);
+    if (res !== undefined) this.res(res);
+  }
 }
 
-/** A {@link Biquad} filter preset to `'highpass'`. @class @extends Biquad */
+/** A {@link Biquad} filter preset to `'highpass'`. */
 class HighPass extends Biquad {
-    constructor(freq, res, context) {
-        super('highpass', context);
-        if (freq !== undefined) this.freq(freq);
-        if (res !== undefined) this.res(res);
-    }
+  /**
+   * Creates a new HighPass instance.
+   *
+   * @param {number} freq - Freq value.
+   * @param {*} res - Res value.
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(freq, res, context) {
+    super('highpass', context);
+    if (freq !== undefined) this.freq(freq);
+    if (res !== undefined) this.res(res);
+  }
 }
 
-/** A {@link Biquad} filter preset to `'lowpass'`. @class @extends Biquad */
+/** A {@link Biquad} filter preset to `'lowpass'`. */
 class LowPass extends Biquad {
-    constructor(freq, res, context) {
-        super('lowpass', context);
-        if (freq !== undefined) this.freq(freq);
-        if (res !== undefined) this.res(res);
-    }
+  /**
+   * Creates a new LowPass instance.
+   *
+   * @param {number} freq - Freq value.
+   * @param {*} res - Res value.
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(freq, res, context) {
+    super('lowpass', context);
+    if (freq !== undefined) this.freq(freq);
+    if (res !== undefined) this.res(res);
+  }
 }
 
-// ---------------------------------------------------------------
+// =============================================================================
 // Delay
-// ---------------------------------------------------------------
+// =============================================================================
 
-/**
- * Delay/echo effect, with a feedback loop for repeating echoes.
- *
- * @class
- * @extends SoundMixEffect
- */
+/** Delay/echo effect, with a feedback loop for repeating echoes. */
 class Delay extends SoundMixEffect {
-    /**
-     * @param {AudioContext} [context]
-     */
-    constructor(context) {
-        super(context);
-        this.effectNode = this.ctx.createDelay(5); // up to 5s max delay
-        this._feedback = this.ctx.createGain();
-        this._feedback.gain.value = 0;
-        this._filter = this.ctx.createBiquadFilter();
-        this._filter.type = 'lowpass';
-        this._filter.frequency.value = 22050; // effectively "off" until process()/freq set
+  /**
+   * Creates a new Delay instance.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(context) {
+    super(context);
+    this.effectNode = this.ctx.createDelay(5); // up to 5s max delay
+    this._feedback = this.ctx.createGain();
+    this._feedback.gain.value = 0;
+    this._filter = this.ctx.createBiquadFilter();
+    this._filter.type = 'lowpass';
+    this._filter.frequency.value = 22050; // effectively "off" until process()/freq set
 
-        // input -> delay -> filter -> wetGain, with delay -> feedback -> delay looping.
-        this.input.connect(this.effectNode);
-        this.effectNode.connect(this._filter);
-        this._filter.connect(this.wetGain);
-        this._filter.connect(this._feedback);
-        this._feedback.connect(this.effectNode);
-    }
+    this.input.connect(this.effectNode);
+    this.effectNode.connect(this._filter);
+    this._filter.connect(this.wetGain);
+    this._filter.connect(this._feedback);
+    this._feedback.connect(this.effectNode);
+  }
 
-    /**
-     * Set the delay time, in seconds.
-     *
-     * @param {number} seconds - Delay time.
-     * @returns {Delay} This instance, to allow chaining.
-     */
-    delayTime(seconds) {
-        this.effectNode.delayTime.setValueAtTime(seconds, this.ctx.currentTime);
-        return this;
-    }
+  /**
+   * Sets delay time in seconds.
+   *
+   * @param {number} seconds - Seconds value.
+   *
+   * @returns {Delay} This instance for chaining.
+   */
+  delayTime(seconds) {
+    this.effectNode.delayTime.setValueAtTime(seconds, this.ctx.currentTime);
+    return this;
+  }
 
-    /**
-     * The amount of feedback in the delay line - how much of the delayed
-     * signal is fed back in, producing repeating echoes.
-     *
-     * @param {number} amount - Feedback amount, generally `0`-`0.9` (values close to `1` can feed back forever).
-     * @returns {Delay} This instance, to allow chaining.
-     */
-    feedback(amount) {
-        this._feedback.gain.setValueAtTime(amount, this.ctx.currentTime);
-        return this;
-    }
+  /**
+   * Sets delay feedback amount.
+   *
+   * @param {number} amount - Amount value.
+   *
+   * @returns {Delay} This instance for chaining.
+   */
+  feedback(amount) {
+    this._feedback.gain.setValueAtTime(amount, this.ctx.currentTime);
+    return this;
+  }
 
-    /**
-     * Process an input signal with a delay effect - a one-call
-     * convenience that connects `source` in and configures the delay's
-     * main parameters together.
-     *
-     * @param {SoundNode|AudioNode} source - Source to process.
-     * @param {number} [delayTime=0.25] - Delay time, in seconds.
-     * @param {number} [feedback=0] - Feedback amount, `0`-`1`.
-     * @param {number} [lowPassFreq] - Optional cutoff frequency for a lowpass filter in the feedback loop, to soften repeats.
-     * @returns {Delay} This instance, to allow chaining.
-     */
-    process(source, delayTime = 0.25, feedback = 0, lowPassFreq) {
-        this.setInput(source);
-        this.delayTime(delayTime);
-        this.feedback(feedback);
-        if (lowPassFreq !== undefined) this._filter.frequency.setValueAtTime(lowPassFreq, this.ctx.currentTime);
-        return this;
-    }
+  /**
+   * Connects and configures an effect input.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} source - Source value.
+   * @param {*} [delayTime=0.25] - Delaytime value.
+   * @param {number} [feedback=0] - Feedback value.
+   * @param {number} lowPassFreq - Lowpassfreq value.
+   *
+   * @returns {Delay} This instance for chaining.
+   */
+  process(source, delayTime = 0.25, feedback = 0, lowPassFreq) {
+    this.setInput(source);
+    this.delayTime(delayTime);
+    this.feedback(feedback);
+    if (lowPassFreq !== undefined) this._filter.frequency.setValueAtTime(lowPassFreq, this.ctx.currentTime);
+    return this;
+  }
 }
 
-// ---------------------------------------------------------------
+// =============================================================================
 // Reverb
-// ---------------------------------------------------------------
+// =============================================================================
 
-/**
- * Convolution reverb effect, using a synthetically-generated (exponentially
- * decaying noise) impulse response.
- *
- * @class
- * @extends SoundMixEffect
- */
+/** Convolution reverb effect, using a synthetically-generated (exponentially decaying noise) impulse response. */
 class Reverb extends SoundMixEffect {
-    constructor(context) {
-        super(context);
-        this.effectNode = this.ctx.createConvolver();
-        this._routeEffect();
-        this.set(3, 2, false);
+  /**
+   * Creates a new Reverb instance.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(context) {
+    super(context);
+    this.effectNode = this.ctx.createConvolver();
+    this._routeEffect();
+    this.set(3, 2, false);
+  }
+
+  /**
+   * Updates the object’s primary configuration values.
+   *
+   * @param {number} [seconds=3] - Seconds value.
+   * @param {number} [decayRate=2] - Decayrate value.
+   * @param {*} [reverse=false] - Reverse value.
+   *
+   * @returns {Reverb} This instance for chaining.
+   */
+  set(seconds = 3, decayRate = 2, reverse = false) {
+    const sampleRate = this.ctx.sampleRate;
+    const length = Math.max(1, Math.floor(sampleRate * seconds));
+    const impulse = this.ctx.createBuffer(2, length, sampleRate);
+
+    for (let channel = 0; channel < impulse.numberOfChannels; channel++) {
+      const data = impulse.getChannelData(channel);
+      for (let i = 0; i < length; i++) {
+        const t = reverse ? length - i : i;
+        data[i] = (Math.random() * 2 - 1) * Math.pow(1 - t / length, decayRate);
+      }
     }
 
-    /**
-     * Set the decay time of the reverb, regenerating its impulse response.
-     *
-     * @param {number} [seconds=3] - Decay (tail) length, in seconds.
-     * @param {number} [decayRate=2] - How quickly the tail decays - higher values decay faster.
-     * @param {boolean} [reverse=false] - Whether to reverse the impulse response (a swelling, backwards-sounding reverb).
-     * @returns {Reverb} This instance, to allow chaining.
-     */
-    set(seconds = 3, decayRate = 2, reverse = false) {
-        const sampleRate = this.ctx.sampleRate;
-        const length = Math.max(1, Math.floor(sampleRate * seconds));
-        const impulse = this.ctx.createBuffer(2, length, sampleRate);
-
-        for (let channel = 0; channel < impulse.numberOfChannels; channel++) {
-            const data = impulse.getChannelData(channel);
-            for (let i = 0; i < length; i++) {
-                const t = reverse ? length - i : i;
-                data[i] = (Math.random() * 2 - 1) * Math.pow(1 - t / length, decayRate);
-            }
-        }
-
-        this.effectNode.buffer = impulse;
-        return this;
-    }
+    this.effectNode.buffer = impulse;
+    return this;
+  }
 }
 
-// ---------------------------------------------------------------
+// =============================================================================
 // Envelope (ADSR)
-// ---------------------------------------------------------------
+// =============================================================================
 
 /**
  * An ADSR (attack/decay/sustain/release) envelope generator, implemented as
- * a `GainNode` whose value is automated over time - insert it into a chain
- * (or `setInput()` a source into it) to apply the shape to that signal, or
- * read/drive `output.gain` directly for controlling another param.
- *
- * @class
- * @extends SoundNode
+ * a gain node whose value is automated over time.
  */
 class Envelope extends SoundNode {
-    constructor(context) {
-        super(context);
-        this.output.gain.value = 0;
+  /**
+   * Creates a new Envelope instance.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(context) {
+    super(context);
+    this.output.gain.value = 0;
 
-        this._attackTime = 0.1;
-        this._attackLevel = 1;
-        this._decayTime = 0.2;
-        this._sustainLevel = 0.5;
-        this._releaseTime = 0.5;
-        this._releaseLevel = 0;
-    }
+    this._attackTime = 0.1;
+    this._attackLevel = 1;
+    this._decayTime = 0.2;
+    this._sustainLevel = 0.5;
+    this._releaseTime = 0.5;
+    this._releaseLevel = 0;
+  }
 
-    /**
-     * Sets the attack time of the envelope: how long it takes to ramp from
-     * silence up to `attackLevel` once triggered.
-     *
-     * @param {number} [time] - Attack time, in seconds.
-     * @returns {Envelope|number} This instance when setting, or the current attack time when reading.
-     */
-    attackTime(time) {
-        if (time === undefined) return this._attackTime;
-        this._attackTime = time;
-        return this;
-    }
+  /**
+   * Gets or sets envelope attack time.
+   *
+   * @param {number} time - Time value.
+   *
+   * @returns {Envelope} This instance for chaining.
+   */
+  attackTime(time) {
+    if (time === undefined) return this._attackTime;
+    this._attackTime = time;
+    return this;
+  }
 
-    /**
-     * Sets the release time of the envelope: how long it takes to ramp
-     * down to `releaseLevel` once released.
-     *
-     * @param {number} [time] - Release time, in seconds.
-     * @returns {Envelope|number} This instance when setting, or the current release time when reading.
-     */
-    releaseTime(time) {
-        if (time === undefined) return this._releaseTime;
-        this._releaseTime = time;
-        return this;
-    }
+  /**
+   * Gets or sets envelope release time.
+   *
+   * @param {number} time - Time value.
+   *
+   * @returns {Envelope} This instance for chaining.
+   */
+  releaseTime(time) {
+    if (time === undefined) return this._releaseTime;
+    this._releaseTime = time;
+    return this;
+  }
 
-    /**
-     * Sets the attack, decay, sustain, and release times/levels of the
-     * envelope, all at once.
-     *
-     * @param {number} attackTime - Attack time, in seconds.
-     * @param {number} decayTime - Decay time, in seconds.
-     * @param {number} susRatio - Sustain level, as a fraction of `attackLevel` (`0`-`1`).
-     * @param {number} releaseTime - Release time, in seconds.
-     * @returns {Envelope} This instance, to allow chaining.
-     */
-    setADSR(attackTime, decayTime, susRatio, releaseTime) {
-        this._attackTime = attackTime;
-        this._decayTime = decayTime;
-        this._sustainLevel = susRatio;
-        this._releaseTime = releaseTime;
-        return this;
-    }
+  /**
+   * Sets attack, decay, sustain, and release values.
+   *
+   * @param {number} attackTime - Attacktime value.
+   * @param {number} decayTime - Decaytime value.
+   * @param {number} susRatio - Susratio value.
+   * @param {number} releaseTime - Releasetime value.
+   *
+   * @returns {Envelope} This instance for chaining.
+   */
+  setADSR(attackTime, decayTime, susRatio, releaseTime) {
+    this._attackTime = attackTime;
+    this._decayTime = decayTime;
+    this._sustainLevel = susRatio;
+    this._releaseTime = releaseTime;
+    return this;
+  }
 
-    /**
-     * Connects an audio source to be shaped by this envelope (it becomes
-     * the envelope's input, gated by `output.gain`).
-     *
-     * @param {SoundNode|AudioNode} source - Source to connect in.
-     * @returns {Envelope} This instance, to allow chaining.
-     */
-    setInput(source) {
-        const node = source instanceof SoundNode ? source.output : source;
-        node.connect(this.output);
-        return this;
-    }
+  /**
+   * Connects a source to this node’s input.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} source - Source value.
+   *
+   * @returns {Envelope} This instance for chaining.
+   */
+  setInput(source) {
+    const node = source instanceof SoundNode ? source.output : source;
+    node.connect(this.output);
+    return this;
+  }
 
-    /**
-     * Trigger the attack, and decay portion of the envelope: ramps from
-     * its current value up to `attackLevel` over `attackTime`, then decays
-     * to `sustainLevel` over `decayTime`.
-     *
-     * @param {SoundNode|AudioNode} [input] - Optional source to `setInput()` first.
-     * @param {number} [time=0] - Delay, in seconds, before starting.
-     * @returns {Envelope} This instance, to allow chaining.
-     */
-    triggerAttack(input, time = 0) {
-        if (input) this.setInput(input);
-        const now = this.ctx.currentTime + time;
-        const param = this.output.gain;
-        param.cancelScheduledValues(now);
-        param.setValueAtTime(param.value, now);
-        param.linearRampToValueAtTime(this._attackLevel, now + this._attackTime);
-        param.linearRampToValueAtTime(this._sustainLevel, now + this._attackTime + this._decayTime);
-        return this;
-    }
+  /**
+   * Schedules the envelope attack and decay stages.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} input - Input value.
+   * @param {number} [time=0] - Time value.
+   *
+   * @returns {Envelope} This instance for chaining.
+   */
+  triggerAttack(input, time = 0) {
+    if (input) this.setInput(input);
+    const now = this.ctx.currentTime + time;
+    const param = this.output.gain;
+    param.cancelScheduledValues(now);
+    param.setValueAtTime(param.value, now);
+    param.linearRampToValueAtTime(this._attackLevel, now + this._attackTime);
+    param.linearRampToValueAtTime(this._sustainLevel, now + this._attackTime + this._decayTime);
+    return this;
+  }
 
-    /**
-     * Trigger the release of the envelope: ramps from its current value
-     * down to `releaseLevel` over `releaseTime`.
-     *
-     * @param {number} [time=0] - Delay, in seconds, before starting.
-     * @returns {Envelope} This instance, to allow chaining.
-     */
-    triggerRelease(time = 0) {
-        const now = this.ctx.currentTime + time;
-        const param = this.output.gain;
-        param.cancelScheduledValues(now);
-        param.setValueAtTime(param.value, now);
-        param.linearRampToValueAtTime(this._releaseLevel, now + this._releaseTime);
-        return this;
-    }
+  /**
+   * Schedules the envelope release stage.
+   *
+   * @param {number} [time=0] - Time value.
+   *
+   * @returns {Envelope} This instance for chaining.
+   */
+  triggerRelease(time = 0) {
+    const now = this.ctx.currentTime + time;
+    const param = this.output.gain;
+    param.cancelScheduledValues(now);
+    param.setValueAtTime(param.value, now);
+    param.linearRampToValueAtTime(this._releaseLevel, now + this._releaseTime);
+    return this;
+  }
 
-    /**
-     * Trigger the envelope (attack + decay), then automatically release it
-     * after `sustainTime`.
-     *
-     * @param {SoundNode|AudioNode} [input] - Optional source to `setInput()` first.
-     * @param {number} [startTime=0] - Delay, in seconds, before the attack starts.
-     * @param {number} [sustainTime=0] - How long to hold at the sustain level before releasing, in seconds.
-     * @returns {Envelope} This instance, to allow chaining.
-     */
-    play(input, startTime = 0, sustainTime = 0) {
-        this.triggerAttack(input, startTime);
-        this.triggerRelease(startTime + this._attackTime + this._decayTime + sustainTime);
-        return this;
-    }
+  /**
+   * Starts or schedules playback.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} input - Input value.
+   * @param {number} [startTime=0] - Starttime value.
+   * @param {number} [sustainTime=0] - Sustaintime value.
+   *
+   * @throws {Error} If playback begins before the sound file has loaded.
+   *
+   * @returns {Envelope} This instance for chaining.
+   */
+  play(input, startTime = 0, sustainTime = 0) {
+    this.triggerAttack(input, startTime);
+    this.triggerRelease(startTime + this._attackTime + this._decayTime + sustainTime);
+    return this;
+  }
 }
 
-// ---------------------------------------------------------------
+// =============================================================================
 // Noise
-// ---------------------------------------------------------------
+// =============================================================================
 
 const NOISE_BUFFER_SECONDS = 2;
 
-/**
- * Generates white, pink, or brown noise.
- *
- * @class
- * @extends SoundSource
- */
+/** Generates white, pink, or brown noise. */
 class Noise extends SoundSource {
-    /**
-     * @param {'white'|'pink'|'brown'} [type='white'] - Noise color.
-     * @param {AudioContext} [context]
-     */
-    constructor(type = 'white', context) {
-        super(context);
-        this._type = type;
-        this._node = null;
-        this._buffers = {};
+  /**
+   * Creates a new Noise instance.
+   *
+   * @param {string} [type='white'] - Type value.
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(type = 'white', context) {
+    super(context);
+    this._type = type;
+    this._node = null;
+    this._buffers = {};
+  }
+
+  /**
+   * Gets or sets the noise type.
+   *
+   * @param {string} type - Type value.
+   *
+   * @returns {Noise} This instance for chaining.
+   */
+  type(type) {
+    if (type === undefined) return this._type;
+    this._type = type;
+    if (this.started) { this.stop(); this.start(); }
+    return this;
+  }
+
+  /**
+   * Returns or creates the selected noise buffer.
+   *
+   * @returns {Noise} This instance for chaining.
+   */
+  _getBuffer() {
+    if (this._buffers[this._type]) return this._buffers[this._type];
+
+    const length = Math.floor(this.ctx.sampleRate * NOISE_BUFFER_SECONDS);
+    const buffer = this.ctx.createBuffer(1, length, this.ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+
+    if (this._type === 'pink') {
+      let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+      for (let i = 0; i < length; i++) {
+        const white = Math.random() * 2 - 1;
+        b0 = 0.99886 * b0 + white * 0.0555179;
+        b1 = 0.99332 * b1 + white * 0.0750759;
+        b2 = 0.96900 * b2 + white * 0.1538520;
+        b3 = 0.86650 * b3 + white * 0.3104856;
+        b4 = 0.55000 * b4 + white * 0.5329522;
+        b5 = -0.7616 * b5 - white * 0.0168980;
+        data[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.11;
+        b6 = white * 0.115926;
+      }
+    } else if (this._type === 'brown') {
+      let last = 0;
+      for (let i = 0; i < length; i++) {
+        const white = Math.random() * 2 - 1;
+        last = (last + 0.02 * white) / 1.02;
+        data[i] = last * 3.5;
+      }
+    } else {
+      for (let i = 0; i < length; i++) data[i] = Math.random() * 2 - 1;
     }
 
-    /**
-     * Changes the type of noise function.
-     *
-     * @param {'white'|'pink'|'brown'} type - Noise color.
-     * @returns {Noise} This instance, to allow chaining.
-     */
-    type(type) {
-        if (type === undefined) return this._type;
-        this._type = type;
-        if (this.started) { this.stop(); this.start(); }
-        return this;
-    }
+    this._buffers[this._type] = buffer;
+    return buffer;
+  }
 
-    /**
-     * @private
-     * @returns {AudioBuffer} A cached, looping noise buffer of the current `type`.
-     */
-    _getBuffer() {
-        if (this._buffers[this._type]) return this._buffers[this._type];
+  /**
+   * Starts or schedules the audio source.
+   *
+   * @param {number} [time=0] - Time value.
+   *
+   * @throws {Error} When invoked on an abstract source or unavailable headless input.
+   *
+   * @returns {Noise} This instance for chaining.
+   */
+  start(time = 0) {
+    if (this.started) this.stop();
+    this._node = this.ctx.createBufferSource();
+    this._node.buffer = this._getBuffer();
+    this._node.loop = true;
+    this._node.connect(this.output);
+    this._node.start(this.ctx.currentTime + time);
+    this.started = true;
+    return this;
+  }
 
-        const length = Math.floor(this.ctx.sampleRate * NOISE_BUFFER_SECONDS);
-        const buffer = this.ctx.createBuffer(1, length, this.ctx.sampleRate);
-        const data = buffer.getChannelData(0);
-
-        if (this._type === 'pink') {
-            let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
-            for (let i = 0; i < length; i++) {
-                const white = Math.random() * 2 - 1;
-                b0 = 0.99886 * b0 + white * 0.0555179;
-                b1 = 0.99332 * b1 + white * 0.0750759;
-                b2 = 0.96900 * b2 + white * 0.1538520;
-                b3 = 0.86650 * b3 + white * 0.3104856;
-                b4 = 0.55000 * b4 + white * 0.5329522;
-                b5 = -0.7616 * b5 - white * 0.0168980;
-                data[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.11;
-                b6 = white * 0.115926;
-            }
-        } else if (this._type === 'brown') {
-            let last = 0;
-            for (let i = 0; i < length; i++) {
-                const white = Math.random() * 2 - 1;
-                last = (last + 0.02 * white) / 1.02;
-                data[i] = last * 3.5;
-            }
-        } else {
-            for (let i = 0; i < length; i++) data[i] = Math.random() * 2 - 1;
-        }
-
-        this._buffers[this._type] = buffer;
-        return buffer;
-    }
-
-    /**
-     * Start the noise source.
-     *
-     * @param {number} [time=0] - Delay, in seconds, before starting.
-     * @returns {Noise} This instance, to allow chaining.
-     */
-    start(time = 0) {
-        if (this.started) this.stop();
-        this._node = this.ctx.createBufferSource();
-        this._node.buffer = this._getBuffer();
-        this._node.loop = true;
-        this._node.connect(this.output);
-        this._node.start(this.ctx.currentTime + time);
-        this.started = true;
-        return this;
-    }
-
-    /**
-     * Stop the noise source.
-     *
-     * @param {number} [time=0] - Delay, in seconds, before stopping.
-     * @returns {Noise} This instance, to allow chaining.
-     */
-    stop(time = 0) {
-        if (this._node) this._node.stop(this.ctx.currentTime + time);
-        this._node = null;
-        this.started = false;
-        return this;
-    }
+  /**
+   * Stops or schedules the audio source.
+   *
+   * @param {number} [time=0] - Time value.
+   *
+   * @returns {Noise} This instance for chaining.
+   */
+  stop(time = 0) {
+    if (this._node) this._node.stop(this.ctx.currentTime + time);
+    this._node = null;
+    this.started = false;
+    return this;
+  }
 }
 
-// ---------------------------------------------------------------
+// =============================================================================
 // Oscillator family
-// ---------------------------------------------------------------
+// =============================================================================
 
 /**
- * A tone generator, wrapping a native `OscillatorNode`. Because
- * `OscillatorNode`s are one-shot (a stopped one can never be restarted),
- * `start()` transparently creates a fresh native node each time.
- *
- * @class
- * @extends SoundSource
+ * A tone generator. Because oscillator nodes are one-shot (a stopped one
+ * can never be restarted), `start()` transparently creates a fresh
+ * underlying node each time.
  */
 class Oscillator extends SoundSource {
-    /**
-     * @param {number} [freq=440] - Starting frequency, in Hz.
-     * @param {OscillatorType} [type='sine'] - Waveform shape.
-     * @param {AudioContext} [context]
-     */
-    constructor(freq = 440, type = 'sine', context) {
-        super(context);
-        this._freq = freq;
-        this._type = type;
-        this._phase = 0;
-        this._node = null;
+  /**
+   * Creates a new Oscillator instance.
+   *
+   * @param {number} [freq=440] - Freq value.
+   * @param {string} [type='sine'] - Type value.
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(freq = 440, type = 'sine', context) {
+    super(context);
+    this._freq = freq;
+    this._type = type;
+    this._phase = 0;
+    this._node = null;
+  }
+
+  /**
+   * Gets or sets frequency.
+   *
+   * @param {*} value - Value value.
+   * @param {number} [rampTime=0] - Ramptime value.
+   *
+   * @returns {Oscillator} This instance for chaining.
+   */
+  freq(value, rampTime = 0) {
+    if (value === undefined) return this._freq;
+    this._freq = value;
+    if (this._node) {
+      const now = this.ctx.currentTime;
+      const param = this._node.frequency;
+      param.cancelScheduledValues(now);
+      if (rampTime > 0) {
+        param.setValueAtTime(param.value, now);
+        param.linearRampToValueAtTime(value, now + rampTime);
+      } else {
+        param.setValueAtTime(value, now);
+      }
     }
+    return this;
+  }
 
-    /**
-     * Adjusts the frequency of the oscillator.
-     *
-     * @param {number} value - Frequency, in Hz.
-     * @param {number} [rampTime=0] - Time, in seconds, to smoothly ramp to `value`.
-     * @returns {Oscillator|number} This instance when setting, or the current frequency when reading.
-     */
-    freq(value, rampTime = 0) {
-        if (value === undefined) return this._freq;
-        this._freq = value;
-        if (this._node) {
-            const now = this.ctx.currentTime;
-            const param = this._node.frequency;
-            param.cancelScheduledValues(now);
-            if (rampTime > 0) {
-                param.setValueAtTime(param.value, now);
-                param.linearRampToValueAtTime(value, now + rampTime);
-            } else {
-                param.setValueAtTime(value, now);
-            }
-        }
-        return this;
-    }
+  /**
+   * Sets oscillator phase as a cycle fraction.
+   *
+   * @param {*} value - Value value.
+   *
+   * @returns {Oscillator} This instance for chaining.
+   */
+  phase(value) {
+    this._phase = ((value % 1) + 1) % 1;
+    return this;
+  }
 
-    /**
-     * Adjusts the phase of the oscillator, as a fraction of one full cycle
-     * (`0`-`1`). Applied by briefly delaying the next `start()` by that
-     * fraction of a period - Web Audio has no native way to change the
-     * phase of an already-running oscillator, so this is only exact when
-     * set *before* `start()` (or before `stop()`+`start()` again).
-     *
-     * @param {number} value - Phase offset, from `0` to `1`.
-     * @returns {Oscillator} This instance, to allow chaining.
-     */
-    phase(value) {
-        this._phase = ((value % 1) + 1) % 1;
-        return this;
-    }
+  /**
+   * Sets the oscillator, noise, or filter type.
+   *
+   * @param {string} type - Type value.
+   *
+   * @returns {Oscillator} This instance for chaining.
+   */
+  setType(type) {
+    this._type = type;
+    if (this._node) this._node.type = type;
+    return this;
+  }
 
-    /**
-     * Sets the type (waveform shape) of the oscillator.
-     *
-     * @param {OscillatorType} type - `'sine'`, `'square'`, `'sawtooth'`, or `'triangle'`.
-     * @returns {Oscillator} This instance, to allow chaining.
-     */
-    setType(type) {
-        this._type = type;
-        if (this._node) this._node.type = type;
-        return this;
-    }
+  /**
+   * Starts or schedules the audio source.
+   *
+   * @param {number} [time=0] - Time value.
+   * @param {number} freq - Freq value.
+   *
+   * @throws {Error} When invoked on an abstract source or unavailable headless input.
+   *
+   * @returns {Oscillator} This instance for chaining.
+   */
+  start(time = 0, freq) {
+    if (this.started) this.stop();
+    if (freq !== undefined) this._freq = freq;
 
-    /**
-     * Starts the oscillator.
-     *
-     * @param {number} [time=0] - Delay, in seconds, before starting.
-     * @param {number} [freq] - Frequency to start at, in Hz (overrides any previously-set frequency).
-     * @returns {Oscillator} This instance, to allow chaining.
-     */
-    start(time = 0, freq) {
-        if (this.started) this.stop();
-        if (freq !== undefined) this._freq = freq;
+    this._node = this.ctx.createOscillator();
+    this._node.type = this._type;
+    this._node.frequency.setValueAtTime(this._freq, this.ctx.currentTime);
+    this._node.connect(this.output);
 
-        this._node = this.ctx.createOscillator();
-        this._node.type = this._type;
-        this._node.frequency.setValueAtTime(this._freq, this.ctx.currentTime);
-        this._node.connect(this.output);
+    const periodDelay = this._freq > 0 ? this._phase / this._freq : 0;
+    this._node.start(this.ctx.currentTime + time + periodDelay);
+    this.started = true;
+    return this;
+  }
 
-        const periodDelay = this._phase / this._freq;
-        this._node.start(this.ctx.currentTime + time + periodDelay);
-        this.started = true;
-        return this;
-    }
-
-    /**
-     * Stops the oscillator.
-     *
-     * @param {number} [time=0] - Delay, in seconds, before stopping.
-     * @returns {Oscillator} This instance, to allow chaining.
-     */
-    stop(time = 0) {
-        if (this._node) this._node.stop(this.ctx.currentTime + time);
-        this._node = null;
-        this.started = false;
-        return this;
-    }
+  /**
+   * Stops or schedules the audio source.
+   *
+   * @param {number} [time=0] - Time value.
+   *
+   * @returns {Oscillator} This instance for chaining.
+   */
+  stop(time = 0) {
+    if (this._node) this._node.stop(this.ctx.currentTime + time);
+    this._node = null;
+    this.started = false;
+    return this;
+  }
 }
 
-/** An {@link Oscillator} preset to a sawtooth wave. @class @extends Oscillator */
+/** An {@link Oscillator} preset to a sawtooth wave. */
 class SawOsc extends Oscillator {
-    constructor(freq = 440, context) { super(freq, 'sawtooth', context); }
+  /**
+   * Creates a new SawOsc instance.
+   *
+   * @param {number} [freq=440] - Freq value.
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(freq = 440, context) { super(freq, 'sawtooth', context); }
 }
-
-/** An {@link Oscillator} preset to a sine wave. @class @extends Oscillator */
+/** An {@link Oscillator} preset to a sine wave. */
 class SinOsc extends Oscillator {
-    constructor(freq = 440, context) { super(freq, 'sine', context); }
+  /**
+   * Creates a new SinOsc instance.
+   *
+   * @param {number} [freq=440] - Freq value.
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(freq = 440, context) { super(freq, 'sine', context); }
 }
-
-/** An {@link Oscillator} preset to a square wave. @class @extends Oscillator */
+/** An {@link Oscillator} preset to a square wave. */
 class SqrOsc extends Oscillator {
-    constructor(freq = 440, context) { super(freq, 'square', context); }
+  /**
+   * Creates a new SqrOsc instance.
+   *
+   * @param {number} [freq=440] - Freq value.
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(freq = 440, context) { super(freq, 'square', context); }
 }
-
-/** An {@link Oscillator} preset to a triangle wave. @class @extends Oscillator */
+/** An {@link Oscillator} preset to a triangle wave. */
 class TriOsc extends Oscillator {
-    constructor(freq = 440, context) { super(freq, 'triangle', context); }
+  /**
+   * Creates a new TriOsc instance.
+   *
+   * @param {number} [freq=440] - Freq value.
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(freq = 440, context) { super(freq, 'triangle', context); }
 }
 
-// ---------------------------------------------------------------
+// =============================================================================
 // AudioIn (microphone)
-// ---------------------------------------------------------------
+// =============================================================================
 
 /**
- * Live audio input from the user's microphone (or other input device), via
- * `getUserMedia`.
- *
- * @class
- * @extends SoundSource
+ * Live audio input from the user's microphone. Node has no
+ * `getUserMedia`/microphone access of its own — this class exists for API
+ * parity, but `start()` always rejects; a browser front-end is the one
+ * that can actually supply microphone input.
  */
 class AudioIn extends SoundSource {
-    constructor(context) {
-        super(context);
-        this._stream = null;
-        this._sourceNode = null;
-    }
+  /**
+   * Creates a new AudioIn instance.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(context) {
+    super(context);
+  }
 
-    /**
-     * Start the audio input: requests microphone permission and, once
-     * granted, connects the live input to `this.output`.
-     *
-     * @param {function(AudioIn):void} [successCallback] - Called once the input is connected.
-     * @param {function(Error):void} [errorCallback] - Called if permission is denied or input can't be opened.
-     * @returns {Promise<AudioIn>} Resolves once the input is connected.
-     */
-    start(successCallback, errorCallback) {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            const error = new Error('AudioIn requires navigator.mediaDevices.getUserMedia support.');
-            if (errorCallback) errorCallback(error);
-            return Promise.reject(error);
-        }
+  /**
+   * Starts or schedules the audio source.
+   *
+   * @param {Function} successCallback - Successcallback value.
+   * @param {Function} errorCallback - Errorcallback value.
+   *
+   * @throws {Error} When invoked on an abstract source or unavailable headless input.
+   *
+   * @returns {AudioIn} This instance for chaining.
+   */
+  start(successCallback, errorCallback) {
+    const error = new Error('AudioIn.start(): no microphone access in a headless Node engine — this must be supplied by a browser front-end.');
+    if (errorCallback) errorCallback(error);
+    return Promise.reject(error);
+  }
 
-        return navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
-            this.stop();
-            this._stream = stream;
-            this._sourceNode = this.ctx.createMediaStreamSource(stream);
-            this._sourceNode.connect(this.output);
-            this.started = true;
-            if (successCallback) successCallback(this);
-            return this;
-        }).catch(error => {
-            if (errorCallback) errorCallback(error);
-            throw error;
-        });
-    }
-
-    /**
-     * Stop the audio input: releases the microphone and disconnects it.
-     *
-     * @returns {AudioIn} This instance, to allow chaining.
-     */
-    stop() {
-        if (this._sourceNode) this._sourceNode.disconnect();
-        if (this._stream) for (const track of this._stream.getTracks()) track.stop();
-        this._sourceNode = null;
-        this._stream = null;
-        this.started = false;
-        return this;
-    }
+  /**
+   * Stops or schedules the audio source.
+   *
+   * @returns {AudioIn} This instance for chaining.
+   */
+  stop() { this.started = false; return this; }
 }
 
-// ---------------------------------------------------------------
+// =============================================================================
 // PitchShifter
-// ---------------------------------------------------------------
+// =============================================================================
 
 /**
  * Shifts the pitch of an audio source in real time, without changing its
  * playback speed. Implemented with the classic two-delay-line "granular"
- * pitch-shifting technique (two crossfading `DelayNode`s whose delay time
- * ramps in a sawtooth pattern) - a reasonable, dependency-free
- * approximation, not a true phase-vocoder; short (~100ms) window artifacts
- * are normal, especially for larger shifts.
- *
- * @class
- * @extends SoundNode
+ * pitch-shifting technique.
  */
 class PitchShifter extends SoundNode {
-    /**
-     * @param {SoundNode|AudioNode} [input] - Source to shift. Can also be set later via `setInput()`.
-     * @param {number} [initialShift=0] - Initial shift, in semitones.
-     * @param {AudioContext} [context]
-     */
-    constructor(input, initialShift = 0, context) {
-        super(context);
-        this._windowSize = 0.1; // seconds
-        this._shift = initialShift;
+  /**
+   * Creates a new PitchShifter instance.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} input - Input value.
+   * @param {*} [initialShift=0] - Initialshift value.
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(input, initialShift = 0, context) {
+    super(context);
+    this._windowSize = 0.1; // seconds
+    this._shift = initialShift;
 
-        this._input = this.ctx.createGain();
-        this._delayA = this.ctx.createDelay(1);
-        this._delayB = this.ctx.createDelay(1);
-        this._gainA = this.ctx.createGain();
-        this._gainB = this.ctx.createGain();
+    this._input = this.ctx.createGain();
+    this._delayA = this.ctx.createDelay(1);
+    this._delayB = this.ctx.createDelay(1);
+    this._gainA = this.ctx.createGain();
+    this._gainB = this.ctx.createGain();
 
-        this._input.connect(this._delayA);
-        this._input.connect(this._delayB);
-        this._delayA.connect(this._gainA);
-        this._delayB.connect(this._gainB);
-        this._gainA.connect(this.output);
-        this._gainB.connect(this.output);
+    this._input.connect(this._delayA);
+    this._input.connect(this._delayB);
+    this._delayA.connect(this._gainA);
+    this._delayB.connect(this._gainB);
+    this._gainA.connect(this.output);
+    this._gainB.connect(this.output);
 
-        this._buildCurves();
-        this._scheduleTimer = null;
-        this._startScheduling();
+    this._buildCurves();
+    this._scheduleTimer = null;
+    this._startScheduling();
 
-        if (input) this.setInput(input);
+    if (input) this.setInput(input);
+  }
+
+  /**
+   * Returns the node that accepts incoming audio.
+   *
+   * @returns {PitchShifter} This instance for chaining.
+   */
+  getInputNode() { return this._input; }
+
+  /**
+   * Sets pitch shift in semitones.
+   *
+   * @param {number} semitones - Semitones value.
+   *
+   * @returns {PitchShifter} This instance for chaining.
+   */
+  shift(semitones) {
+    this._shift = semitones;
+    this._buildCurves();
+    return this;
+  }
+
+  /**
+   * Rebuilds pitch-shifter modulation curves.
+   *
+   * @returns {void} The resulting value.
+   */
+  _buildCurves() {
+    const steps = 64;
+    const rate = Math.pow(2, this._shift / 12);
+    const drift = (1 - rate) * this._windowSize;
+
+    const delayCurve = new Float32Array(steps);
+    const gainCurve = new Float32Array(steps);
+    for (let i = 0; i < steps; i++) {
+      const t = i / (steps - 1);
+      delayCurve[i] = Math.max(0, this._windowSize / 2 + drift * t);
+      gainCurve[i] = Math.sin(Math.PI * t);
     }
+    this._delayCurve = delayCurve;
+    this._gainCurve = gainCurve;
+  }
 
-    /** @override */
-    getInputNode() { return this._input; }
+  /**
+   * Starts the pitch-shifter scheduling loop.
+   *
+   * @returns {void} The resulting value.
+   */
+  _startScheduling() {
+    const scheduleWindow = () => {
+      const now = this.ctx.currentTime + 0.02;
+      const half = this._windowSize / 2;
 
-    /**
-     * Shift the pitch of the source audio.
-     *
-     * @param {number} semitones - Amount to shift, in semitones (positive = higher, negative = lower).
-     * @returns {PitchShifter} This instance, to allow chaining.
-     */
-    shift(semitones) {
-        this._shift = semitones;
-        this._buildCurves();
-        return this;
-    }
+      this._delayA.delayTime.setValueCurveAtTime(this._delayCurve, now, this._windowSize);
+      this._gainA.gain.setValueCurveAtTime(this._gainCurve, now, this._windowSize);
 
-    /**
-     * (Re)builds the control-rate delayTime/gain curves used each
-     * scheduling window, based on the current `shift` amount.
-     *
-     * @private
-     * @returns {void}
-     */
-    _buildCurves() {
-        const steps = 64;
-        const rate = Math.pow(2, this._shift / 12);
-        // How fast the delay "drifts" across one window, in seconds/second.
-        // rate > 1 (higher pitch) -> delay shrinks over the window.
-        // rate < 1 (lower pitch) -> delay grows over the window.
-        const drift = (1 - rate) * this._windowSize;
+      this._delayB.delayTime.setValueCurveAtTime(this._delayCurve, now + half, this._windowSize);
+      this._gainB.gain.setValueCurveAtTime(this._gainCurve, now + half, this._windowSize);
+    };
 
-        const delayCurve = new Float32Array(steps);
-        const gainCurve = new Float32Array(steps);
-        for (let i = 0; i < steps; i++) {
-            const t = i / (steps - 1);
-            delayCurve[i] = Math.max(0, this._windowSize / 2 + drift * t);
-            // Triangular (Hann-ish) window so each grain fades in/out,
-            // avoiding clicks at the seams between windows.
-            gainCurve[i] = Math.sin(Math.PI * t);
-        }
-        this._delayCurve = delayCurve;
-        this._gainCurve = gainCurve;
-    }
+    scheduleWindow();
+    this._scheduleTimer = setInterval(scheduleWindow, this._windowSize * 1000);
+    if (this._scheduleTimer.unref) this._scheduleTimer.unref();
+  }
 
-    /**
-     * Starts (or restarts) the recurring scheduler that keeps both delay
-     * lines' automation curves populated slightly ahead of playback -
-     * `AudioParam` curves can't loop natively, so this resubmits them once
-     * per window, offsetting line B by half a window from line A so their
-     * fades crossfade into each other.
-     *
-     * @private
-     * @returns {void}
-     */
-    _startScheduling() {
-        const scheduleWindow = () => {
-            const now = this.ctx.currentTime + 0.02; // small lookahead
-            const half = this._windowSize / 2;
-
-            this._delayA.delayTime.setValueCurveAtTime(this._delayCurve, now, this._windowSize);
-            this._gainA.gain.setValueCurveAtTime(this._gainCurve, now, this._windowSize);
-
-            this._delayB.delayTime.setValueCurveAtTime(this._delayCurve, now + half, this._windowSize);
-            this._gainB.gain.setValueCurveAtTime(this._gainCurve, now + half, this._windowSize);
-        };
-
-        scheduleWindow();
-        this._scheduleTimer = setInterval(scheduleWindow, this._windowSize * 1000);
-    }
-
-    /**
-     * Stops the internal scheduling loop and disconnects everything -
-     * call this when you're done with a `PitchShifter` so it isn't left
-     * running a `setInterval` forever.
-     *
-     * @returns {void}
-     */
-    dispose() {
-        if (this._scheduleTimer) clearInterval(this._scheduleTimer);
-        this._scheduleTimer = null;
-        this.disconnect();
-        this._input.disconnect();
-    }
+  /**
+   * Stops timers and disconnects pitch-shifter nodes.
+   *
+   * @returns {void} The resulting value.
+   */
+  dispose() {
+    if (this._scheduleTimer) clearInterval(this._scheduleTimer);
+    this._scheduleTimer = null;
+    this.disconnect();
+    this._input.disconnect();
+  }
 }
 
-// ---------------------------------------------------------------
+// =============================================================================
 // SoundFile
-// ---------------------------------------------------------------
+// =============================================================================
 
-/**
- * Loads and plays back an audio file.
- *
- * @class
- * @extends SoundSource
- */
+/** Loads and plays back an audio file. */
 class SoundFile extends SoundSource {
-    /**
-     * @param {string} [path] - URL/path to an audio file. Loading starts immediately if given.
-     * @param {function(SoundFile):void} [onload] - Called once decoding finishes.
-     * @param {function(Error):void} [onerror] - Called if loading/decoding fails.
-     * @param {function(number):void} [whileLoading] - Called periodically with a `0`-`100` load percentage, if the server reports a `Content-Length`.
-     * @param {AudioContext} [context]
-     */
-    constructor(path, onload, onerror, whileLoading, context) {
-        super(context);
-        this.buffer = null;
-        this._sourceNode = null;
-        this._path = null;
-        this._playing = false;
-        this._looping = false;
-        this._loopStart = 0;
-        this._loopEnd = 0;
-        this._rate = 1;
-        this._startedAt = 0;
-        this._pausedAt = 0;
-        this._onendedCallbacks = [];
+  /**
+   * Creates a new SoundFile instance.
+   *
+   * @param {string} path - Path value.
+   * @param {Function} onload - Onload value.
+   * @param {Function} onerror - Onerror value.
+   * @param {Function} whileLoading - Whileloading value.
+   * @param {SoundNode|VirtualAudioNode|Object} context - Context value.
+   */
+  constructor(path, onload, onerror, whileLoading, context) {
+    super(context);
+    this.buffer = null;
+    this._sourceNode = null;
+    this._path = null;
+    this._playing = false;
+    this._looping = false;
+    this._loopStart = 0;
+    this._loopEnd = 0;
+    this._rate = 1;
+    this._startedAt = 0;
+    this._pausedAt = 0;
+    this._onendedCallbacks = [];
 
-        if (path) this.setPath(path, onload, onerror, whileLoading);
-    }
+    if (path) this.setPath(path, onload, onerror, whileLoading);
+  }
 
-    /**
-     * Change the path for the soundfile, and (re)load it, replacing
-     * whatever was previously loaded into this instance.
-     *
-     * @param {string} path - URL/path to the audio file.
-     * @param {function(SoundFile):void} [onload] - Called once decoding finishes.
-     * @param {function(Error):void} [onerror] - Called if loading/decoding fails.
-     * @param {function(number):void} [whileLoading] - Called periodically with a `0`-`100` load percentage.
-     * @returns {SoundFile} This instance, to allow chaining.
-     */
-    setPath(path, onload, onerror, whileLoading) {
-        this._path = path;
-        this.buffer = null;
+  /**
+   * Changes and reloads the sound-file source.
+   *
+   * @param {string} path - Path value.
+   * @param {Function} onload - Onload value.
+   * @param {Function} onerror - Onerror value.
+   * @param {Function} whileLoading - Whileloading value.
+   *
+   * @returns {SoundFile} This instance for chaining.
+   */
+  setPath(path, onload, onerror, whileLoading) {
+    this._path = path;
+    this.buffer = null;
 
-        fetch(path)
-            .then(async response => {
-                if (!response.ok) throw new Error(`SoundFile: ${response.status} ${response.statusText} for ${path}`);
-
-                const total = Number(response.headers.get('Content-Length')) || 0;
-                if (whileLoading && total && response.body) {
-                    const reader = response.body.getReader();
-                    const chunks = [];
-                    let received = 0;
-                    for (;;) {
-                        const { done, value } = await reader.read();
-                        if (done) break;
-                        chunks.push(value);
-                        received += value.length;
-                        whileLoading(Math.min(100, (received / total) * 100));
-                    }
-                    const bytes = new Uint8Array(received);
-                    let offset = 0;
-                    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-                    return bytes.buffer;
-                }
-                return response.arrayBuffer();
-            })
-            .then(arrayBuffer => this.ctx.decodeAudioData(arrayBuffer))
-            .then(audioBuffer => {
-                this.buffer = audioBuffer;
-                this._loopEnd = audioBuffer.duration;
-                if (whileLoading) whileLoading(100);
-                if (onload) onload(this);
-            })
-            .catch(error => { if (onerror) onerror(error); });
-
-        return this;
-    }
-
-    /**
-     * Start the soundfile. An alias for {@link SoundFile#play}.
-     *
-     * @param {number} [time=0] - Delay, in seconds, before starting.
-     * @param {number} [rate=1] - Playback rate (`1` = normal speed).
-     * @param {number} [amp=1] - Playback amplitude.
-     * @returns {SoundFile} This instance, to allow chaining.
-     */
-    start(time = 0, rate = 1, amp = 1) {
-        return this.play(time, rate, amp);
-    }
-
-    /**
-     * Start the soundfile (from the beginning, or from wherever
-     * {@link SoundFile#pause}/{@link SoundFile#jump} left off).
-     *
-     * @param {number} [time=0] - Delay, in seconds, before starting.
-     * @param {number} [rate=1] - Playback rate (`1` = normal speed).
-     * @param {number} [amp=1] - Playback amplitude.
-     * @param {number} [loopStart] - When looping, the loop's start offset, in seconds.
-     * @param {number} [duration] - How long to play before automatically stopping, in seconds. Plays to the end if omitted.
-     * @returns {SoundFile} This instance, to allow chaining.
-     * @throws {Error} If the file hasn't finished loading yet.
-     */
-    play(time = 0, rate = 1, amp = 1, loopStart, duration) {
-        if (!this.buffer) throw new Error('SoundFile: play() called before the file finished loading.');
-        if (this._playing) this._stopSource();
-
-        this._rate = rate;
-        this._sourceNode = this.ctx.createBufferSource();
-        this._sourceNode.buffer = this.buffer;
-        this._sourceNode.playbackRate.value = rate;
-        this._sourceNode.loop = this._looping;
-        this._sourceNode.loopStart = loopStart ?? this._loopStart;
-        this._sourceNode.loopEnd = this._loopEnd || this.buffer.duration;
-        this._sourceNode.connect(this.output);
-        this.amp(amp);
-
-        this._sourceNode.onended = () => {
-            if (this._playing) {
-                this._playing = false;
-                this._pausedAt = 0;
-                for (const cb of this._onendedCallbacks) cb(this);
-            }
-        };
-
-        const offset = this._pausedAt;
-        this._startedAt = this.ctx.currentTime + time - offset;
-        if (duration !== undefined) this._sourceNode.start(this.ctx.currentTime + time, offset, duration);
-        else this._sourceNode.start(this.ctx.currentTime + time, offset);
-
-        this._playing = true;
-        this.started = true;
-        return this;
-    }
-
-    /**
-     * Loop the soundfile: equivalent to `setLoop(true)` followed by
-     * `play()`.
-     *
-     * @param {number} [time=0] - Delay, in seconds, before starting.
-     * @param {number} [rate=1] - Playback rate.
-     * @param {number} [amp=1] - Playback amplitude.
-     * @param {number} [loopStart=0] - Loop start offset, in seconds.
-     * @param {number} [loopEnd] - Loop end offset, in seconds. Defaults to the end of the file.
-     * @returns {SoundFile} This instance, to allow chaining.
-     */
-    loop(time = 0, rate = 1, amp = 1, loopStart = 0, loopEnd) {
-        this._looping = true;
-        this._loopStart = loopStart;
-        this._loopEnd = loopEnd ?? (this.buffer ? this.buffer.duration : 0);
-        return this.play(time, rate, amp, loopStart);
-    }
-
-    /**
-     * Set whether the soundfile should loop once it reaches the end,
-     * without necessarily (re)starting playback.
-     *
-     * @param {boolean} [shouldLoop=true] - New loop state.
-     * @returns {SoundFile} This instance, to allow chaining.
-     */
-    setLoop(shouldLoop = true) {
-        this._looping = shouldLoop;
-        if (this._sourceNode) this._sourceNode.loop = shouldLoop;
-        return this;
-    }
-
-    /**
-     * Return the looping state of the soundfile.
-     *
-     * @returns {boolean} `true` if currently set to loop.
-     */
-    isLooping() {
-        return this._looping;
-    }
-
-    /**
-     * Return the playback state of the soundfile.
-     *
-     * @returns {boolean} `true` if currently playing.
-     */
-    isPlaying() {
-        return this._playing;
-    }
-
-    /**
-     * Pause the soundfile, remembering the current position so
-     * {@link SoundFile#play} resumes from there.
-     *
-     * @returns {SoundFile} This instance, to allow chaining.
-     */
-    pause() {
-        if (!this._playing) return this;
-        this._pausedAt = (this.ctx.currentTime - this._startedAt) * this._rate;
-        this._stopSource();
-        this._playing = false;
-        return this;
-    }
-
-    /**
-     * Stop the soundfile, resetting playback position back to the start.
-     *
-     * @param {number} [time=0] - Delay, in seconds, before stopping.
-     * @returns {SoundFile} This instance, to allow chaining.
-     */
-    stop(time = 0) {
-        this._stopSource(time);
-        this._playing = false;
-        this._pausedAt = 0;
-        return this;
-    }
-
-    /**
-     * Move the playhead of a soundfile that is currently playing to a new
-     * position, without stopping playback.
-     *
-     * @param {number} cueTime - New position, in seconds.
-     * @param {number} [duration] - How long to play before automatically stopping, in seconds.
-     * @returns {SoundFile} This instance, to allow chaining.
-     */
-    jump(cueTime, duration) {
-        const wasPlaying = this._playing;
-        this._stopSource();
-        this._pausedAt = cueTime;
-        if (wasPlaying) this.play(0, this._rate, undefined, undefined, duration);
-        return this;
-    }
-
-    /**
-     * Set a loop region, without changing the current loop on/off state.
-     *
-     * @param {number} loopStart - Loop start offset, in seconds.
-     * @param {number} loopEnd - Loop end offset, in seconds.
-     * @returns {SoundFile} This instance, to allow chaining.
-     */
-    setLoopPoints(loopStart, loopEnd) {
-        this._loopStart = loopStart;
-        this._loopEnd = loopEnd;
-        if (this._sourceNode) {
-            this._sourceNode.loopStart = loopStart;
-            this._sourceNode.loopEnd = loopEnd;
+    const readBytes = isURL(path)
+      ? fetch(path).then(async response => {
+        if (!response.ok) throw new Error(`SoundFile: ${response.status} ${response.statusText} for ${path}`);
+        const total = Number(response.headers.get('Content-Length')) || 0;
+        if (whileLoading && total && response.body) {
+          const reader = response.body.getReader();
+          const chunks = [];
+          let received = 0;
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            received += value.length;
+            whileLoading(Math.min(100, (received / total) * 100));
+          }
+          const bytes = new Uint8Array(received);
+          let offset = 0;
+          for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+          return Buffer.from(bytes);
         }
-        return this;
-    }
+        return Buffer.from(await response.arrayBuffer());
+      })
+      : Promise.resolve().then(() => fs.readFileSync(path));
 
-    /**
-     * Set the playback rate of the soundfile.
-     *
-     * @param {number} [value] - Playback rate (`1` = normal speed, `2` = double speed/pitch, `0.5` = half, negative = reverse).
-     * @returns {SoundFile|number} This instance when setting, or the current rate when reading.
-     */
-    rate(value) {
-        if (value === undefined) return this._rate;
-        this._rate = value;
-        if (this._sourceNode) this._sourceNode.playbackRate.setValueAtTime(value, this.ctx.currentTime);
-        return this;
-    }
+    readBytes
+      .then(buf => this.ctx.decodeAudioData(buf))
+      .then(audioBuffer => {
+        this.buffer = audioBuffer;
+        this._loopEnd = audioBuffer.duration;
+        if (whileLoading) whileLoading(100);
+        if (onload) onload(this);
+      })
+      .catch(error => { if (onerror) onerror(error); });
 
-    /**
-     * Returns the duration of the sound file, in seconds.
-     *
-     * @returns {number} Duration in seconds, or `0` if not yet loaded.
-     */
-    duration() {
-        return this.buffer ? this.buffer.duration : 0;
-    }
+    return this;
+  }
 
-    /**
-     * Return the number of samples in the sound file.
-     *
-     * @returns {number} Total sample frames, or `0` if not yet loaded.
-     */
-    frames() {
-        return this.buffer ? this.buffer.length : 0;
-    }
+  /**
+   * Starts or schedules the audio source.
+   *
+   * @param {number} [time=0] - Time value.
+   * @param {number} [rate=1] - Rate value.
+   * @param {number} [amp=1] - Amp value.
+   *
+   * @throws {Error} When invoked on an abstract source or unavailable headless input.
+   *
+   * @returns {SoundFile} This instance for chaining.
+   */
+  start(time = 0, rate = 1, amp = 1) { return this.play(time, rate, amp); }
 
-    /**
-     * Gets the number of channels in the sound file.
-     *
-     * @returns {number} Channel count (`1` = mono, `2` = stereo, ...), or `0` if not yet loaded.
-     */
-    channels() {
-        return this.buffer ? this.buffer.numberOfChannels : 0;
-    }
+  /**
+   * Starts or schedules playback.
+   *
+   * @param {number} [time=0] - Time value.
+   * @param {number} [rate=1] - Rate value.
+   * @param {number} [amp=1] - Amp value.
+   * @param {number} loopStart - Loopstart value.
+   * @param {number} duration - Duration value.
+   *
+   * @throws {Error} If playback begins before the sound file has loaded.
+   *
+   * @returns {SoundFile} This instance for chaining.
+   */
+  play(time = 0, rate = 1, amp = 1, loopStart, duration) {
+    if (!this.buffer) throw new Error('SoundFile: play() called before the file finished loading.');
+    if (this._playing) this._stopSource();
 
-    /**
-     * Return the sample rate of the sound file.
-     *
-     * @returns {number} Sample rate, in Hz, or the context's sample rate if not yet loaded.
-     */
-    sampleRate() {
-        return this.buffer ? this.buffer.sampleRate : this.ctx.sampleRate;
-    }
+    this._rate = rate;
+    this._sourceNode = this.ctx.createBufferSource();
+    this._sourceNode.buffer = this.buffer;
+    this._sourceNode.playbackRate.value = rate;
+    this._sourceNode.loop = this._looping;
+    this._sourceNode.loopStart = loopStart ?? this._loopStart;
+    this._sourceNode.loopEnd = this._loopEnd || this.buffer.duration;
+    this._sourceNode.connect(this.output);
+    this.amp(amp);
 
-    /**
-     * Define a function to call when the soundfile is done playing (fires
-     * whether playback ended naturally or via `stop()`).
-     *
-     * @param {function(SoundFile):void} callback - Called with this instance.
-     * @returns {SoundFile} This instance, to allow chaining.
-     */
-    onended(callback) {
-        this._onendedCallbacks.push(callback);
-        return this;
-    }
+    this._sourceNode.onended = () => {
+      if (this._playing) {
+        this._playing = false;
+        this._pausedAt = 0;
+        for (const cb of this._onendedCallbacks) cb(this);
+      }
+    };
 
-    /**
-     * @private
-     * @param {number} [time=0] - Delay, in seconds, before stopping the underlying native node.
-     * @returns {void}
-     */
-    _stopSource(time = 0) {
-        if (!this._sourceNode) return;
-        this._sourceNode.onended = null;
-        try { this._sourceNode.stop(this.ctx.currentTime + time); } catch { /* already stopped */ }
-        this._sourceNode.disconnect();
-        this._sourceNode = null;
+    const offset = this._pausedAt;
+    this._startedAt = this.ctx.currentTime + time - offset;
+    this._sourceNode.start(this.ctx.currentTime + time, offset, duration);
+
+    this._playing = true;
+    this.started = true;
+    return this;
+  }
+
+  /**
+   * Enables looping and starts playback.
+   *
+   * @param {number} [time=0] - Time value.
+   * @param {number} [rate=1] - Rate value.
+   * @param {number} [amp=1] - Amp value.
+   * @param {number} [loopStart=0] - Loopstart value.
+   * @param {number} loopEnd - Loopend value.
+   *
+   * @returns {SoundFile} This instance for chaining.
+   */
+  loop(time = 0, rate = 1, amp = 1, loopStart = 0, loopEnd) {
+    this._looping = true;
+    this._loopStart = loopStart;
+    this._loopEnd = loopEnd ?? (this.buffer ? this.buffer.duration : 0);
+    return this.play(time, rate, amp, loopStart);
+  }
+
+  /**
+   * Enables or disables looping.
+   *
+   * @param {*} [shouldLoop=true] - Shouldloop value.
+   *
+   * @returns {SoundFile} This instance for chaining.
+   */
+  setLoop(shouldLoop = true) {
+    this._looping = shouldLoop;
+    if (this._sourceNode) this._sourceNode.loop = shouldLoop;
+    return this;
+  }
+
+  /**
+   * Reports whether looping is enabled.
+   *
+   * @returns {boolean} The resulting value.
+   */
+  isLooping() { return this._looping; }
+
+  /**
+   * Reports whether playback is active.
+   *
+   * @returns {boolean} The resulting value.
+   */
+  isPlaying() { return this._playing; }
+
+  /**
+   * Pauses playback and preserves the current position.
+   *
+   * @returns {SoundFile} This instance for chaining.
+   */
+  pause() {
+    if (!this._playing) return this;
+    this._pausedAt = (this.ctx.currentTime - this._startedAt) * this._rate;
+    this._stopSource();
+    this._playing = false;
+    return this;
+  }
+
+  /**
+   * Stops or schedules the audio source.
+   *
+   * @param {number} [time=0] - Time value.
+   *
+   * @returns {SoundFile} This instance for chaining.
+   */
+  stop(time = 0) {
+    this._stopSource(time);
+    this._playing = false;
+    this._pausedAt = 0;
+    return this;
+  }
+
+  /**
+   * Moves the playhead to a specified cue time.
+   *
+   * @param {number} cueTime - Cuetime value.
+   * @param {number} duration - Duration value.
+   *
+   * @returns {SoundFile} This instance for chaining.
+   */
+  jump(cueTime, duration) {
+    const wasPlaying = this._playing;
+    this._stopSource();
+    this._pausedAt = cueTime;
+    if (wasPlaying) this.play(0, this._rate, undefined, undefined, duration);
+    return this;
+  }
+
+  /**
+   * Sets loop start and end times.
+   *
+   * @param {number} loopStart - Loopstart value.
+   * @param {number} loopEnd - Loopend value.
+   *
+   * @returns {SoundFile} This instance for chaining.
+   */
+  setLoopPoints(loopStart, loopEnd) {
+    this._loopStart = loopStart;
+    this._loopEnd = loopEnd;
+    if (this._sourceNode) {
+      this._sourceNode.loopStart = loopStart;
+      this._sourceNode.loopEnd = loopEnd;
     }
+    return this;
+  }
+
+  /**
+   * Gets or sets playback rate.
+   *
+   * @param {*} value - Value value.
+   *
+   * @returns {SoundFile} This instance for chaining.
+   */
+  rate(value) {
+    if (value === undefined) return this._rate;
+    this._rate = value;
+    if (this._sourceNode) this._sourceNode.playbackRate.setValueAtTime(value, this.ctx.currentTime);
+    return this;
+  }
+
+  /**
+   * Returns duration in seconds.
+   *
+   * @returns {number} The resulting value.
+   */
+  duration() { return this.buffer ? this.buffer.duration : 0; }
+
+  /**
+   * Returns the sample-frame count.
+   *
+   * @returns {number} The resulting value.
+   */
+  frames() { return this.buffer ? this.buffer.length : 0; }
+
+  /**
+   * Returns the channel count.
+   *
+   * @returns {number} The resulting value.
+   */
+  channels() { return this.buffer ? this.buffer.numberOfChannels : 0; }
+
+  /**
+   * Returns the sample rate.
+   *
+   * @returns {number} The resulting value.
+   */
+  sampleRate() { return this.buffer ? this.buffer.sampleRate : this.ctx.sampleRate; }
+
+  /**
+   * Registers a playback-completion callback.
+   *
+   * @param {Function} callback - Callback value.
+   *
+   * @returns {SoundFile} This instance for chaining.
+   */
+  onended(callback) { this._onendedCallbacks.push(callback); return this; }
+
+  /**
+   * Stops and disconnects the active buffer source.
+   *
+   * @param {number} [time=0] - Time value.
+   *
+   * @returns {void} The resulting value.
+   */
+  _stopSource(time = 0) {
+    if (!this._sourceNode) return;
+    this._sourceNode.onended = null;
+    try { this._sourceNode.stop(this.ctx.currentTime + time); } catch { /* already stopped */ }
+    this._sourceNode.disconnect();
+    this._sourceNode = null;
+  }
 }
 
 /**
- * loadSound() returns a new {@link SoundFile} from a specified path.
- * Loading happens asynchronously; the returned `SoundFile` is usable
- * immediately for hooking up callbacks/effects, but {@link
- * SoundFile#play}/etc. must wait until `onload` fires (or `soundFile.buffer`
- * is non-`null`).
+ * Creates and begins loading a sound file.
  *
- * @param {string} path - URL/path to an audio file.
- * @param {function(SoundFile):void} [onload] - Called once decoding finishes.
- * @param {function(Error):void} [onerror] - Called if loading/decoding fails.
- * @param {function(number):void} [whileLoading] - Called periodically with a `0`-`100` load percentage.
- * @returns {SoundFile} A `SoundFile`, loading in the background.
+ * @param {string} path - Path value.
+ * @param {Function} onload - Onload value.
+ * @param {Function} onerror - Onerror value.
+ * @param {Function} whileLoading - Whileloading value.
+ *
+ * @returns {SoundFile} This instance for chaining.
  */
 function loadSound(path, onload, onerror, whileLoading) {
-    return new SoundFile(path, onload, onerror, whileLoading);
+  return new SoundFile(path, onload, onerror, whileLoading);
 }
 
-// ---------------------------------------------------------------
-// Export
-// ---------------------------------------------------------------
+module.exports = {
+  // Globals
+  loadSound,
+  clamp,
+  getAudioContext,
+  setAudioContext,
+  userStartAudio,
+  userStopAudio,
 
-const Sound = {
-    // Globals
-    loadSound,
-    getAudioContext,
-    setAudioContext,
-    userStartAudio,
-    userStopAudio,
+  // Classes
+  SoundNode,
+  SoundSource,
+  SoundMixEffect,
+  SoundFile,
+  Amplitude,
+  AudioIn,
+  Biquad,
+  BandPass,
+  HighPass,
+  LowPass,
+  Delay,
+  Envelope,
+  FFT,
+  Gain,
+  Noise,
+  Oscillator,
+  SawOsc,
+  SinOsc,
+  SqrOsc,
+  TriOsc,
+  Panner,
+  Panner3D,
+  PitchShifter,
+  Reverb,
 
-    // Classes
-    SoundNode,
-    SoundSource,
-    SoundMixEffect,
-    SoundFile,
-    Amplitude,
-    AudioIn,
-    Biquad,
-    BandPass,
-    HighPass,
-    LowPass,
-    Delay,
-    Envelope,
-    FFT,
-    Gain,
-    Noise,
-    Oscillator,
-    SawOsc,
-    SinOsc,
-    SqrOsc,
-    TriOsc,
-    Panner,
-    Panner3D,
-    PitchShifter,
-    Reverb
+  // Virtual Web Audio shim, exposed for advanced use (custom nodes, testing, a future front-end bridge)
+  VirtualAudioContext
 };
-
-return Sound;
-});

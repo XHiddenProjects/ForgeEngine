@@ -8,9 +8,19 @@
   "scripts": {
     "start": "node core/index.js",
     "dev": "node --watch core/index.js",
-    "test":"echo \"No tests specified\""
+    "test": "echo \"No tests specified\""
   },
-  "engines": { "node": ">=18" },
-  "workspaces": ["core", "utils", "2d", "3d"],
-  "dependencies": { "express": "^5.1.0" }
+  "engines": {
+    "node": ">=18"
+  },
+  "workspaces": [
+    "core",
+    "utils",
+    "2d",
+    "3d"
+  ],
+  "dependencies": {
+    "express": "^5.1.0",
+    "opentype.js": "^2.0.0"
+  }
 }

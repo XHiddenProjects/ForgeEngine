@@ -1,610 +1,868 @@
 'use strict';
 
-// Wrapped in an IIFE - see the comment at the top of Transform.js for why:
-// this file may be loaded as a sibling <script> tag alongside the other
-// engine files, all sharing ONE global scope. IO has no dependency on any
-// of them (it doesn't touch a canvas at all), so - like Transform.js - it
-// only ever leaks its name via an explicit `root.IO` assignment, never a
-// top-level `const`/`class` declaration.
-(function (root, factory) {
-    const IO = factory();
-    if (typeof module === 'object' && module.exports) {
-        module.exports = IO;
-        module.exports.IO = IO;
-    } else if (root) {
-        root.IO = IO;
-    }
-})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+const fs = require('fs');
+const constants = require('./constants.js');
 
 /**
- * Resolves to `fetch` in a browser, or Node's global `fetch` (Node 18+) when
- * running under `require()`. Centralized here so every loader/http method
- * below fails with the same clear error instead of a bare
- * "fetch is not defined".
+ * Determines whether a path is an HTTP or HTTPS URL.
  *
- * @private
- * @returns {typeof fetch} The available `fetch` implementation.
- * @throws {Error} If no `fetch` implementation is available.
+ * @param {string|number|*} p - P value.
+ *
+ * @returns {boolean} The resulting value.
  */
-function getFetch() {
-    if (typeof fetch === 'function') return fetch;
-    throw new Error('IO requires a `fetch` implementation (a browser, or Node 18+).');
+function isURL(p) { return /^https?:\/\//i.test(p); }
+
+// ---------------------------------------------------------------------------
+// Table
+// ---------------------------------------------------------------------------
+class Table {
+  /**
+   * Creates a new Table instance.
+   *
+   * @param {string|number|*} [columns=[]] - Columns value.
+   */
+  constructor(columns = []) {
+    this.columnNames = columns.slice();
+    this.data = []; // array of arrays (row-major), values as strings/numbers
+  }
+
+  /**
+   * Parses delimited text into a table.
+   *
+   * @param {string|number|*} text - Text value.
+   * @param {string|number|*} [delimiter='] - Field delimiter.
+   * @param {string|number|*} ' - ' value.
+   * @param {boolean} [hasHeader=true] - Whether the first row contains column names.
+   *
+   * @returns {Table} This instance for chaining.
+   */
+  static fromCSV(text, delimiter = ',', hasHeader = true) {
+    const lines = text.split(/\r\n|\r|\n/).filter(l => l.length > 0);
+    const table = new Table();
+    let start = 0;
+    if (hasHeader && lines.length) {
+      table.columnNames = lines[0].split(delimiter);
+      start = 1;
+    }
+    for (let i = start; i < lines.length; i++) {
+      table.data.push(lines[i].split(delimiter));
+    }
+    return table;
+  }
+
+  /**
+   * Serializes the table as delimited text.
+   *
+   * @param {string|number|*} [delimiter='] - Field delimiter.
+   * @param {string|number|*} ' - ' value.
+   *
+   * @returns {string} The resulting value.
+   */
+  toCSV(delimiter = ',') {
+    const rows = [];
+    if (this.columnNames.length) rows.push(this.columnNames.join(delimiter));
+    for (const row of this.data) rows.push(row.join(delimiter));
+    return rows.join('\n');
+  }
+
+  /**
+   * Returns the current columns value.
+   *
+   * @returns {string[]} The resulting value.
+   */
+  get columns() { return this.columnNames.slice(); }
+  /**
+   * Returns the effective number of columns.
+   *
+   * @returns {number} The resulting value.
+   */
+  getColumnCount() { return this.columnNames.length || (this.data[0] ? this.data[0].length : 0); }
+  /**
+   * Returns the number of rows.
+   *
+   * @returns {number} The resulting value.
+   */
+  getRowCount() { return this.data.length; }
+
+  /**
+   * Resolves a column name or index to a numeric index.
+   *
+   * @param {string|number|*} col - Column name or zero-based index.
+   *
+   * @returns {number} The resulting value.
+   */
+  _colIndex(col) {
+    return typeof col === 'number' ? col : this.columnNames.indexOf(col);
+  }
+
+  /**
+   * Appends a column and initializes existing rows.
+   *
+   * @param {string|number|*} [title=''] - Title value.
+   * @param {string|number|*} type - Type value.
+   *
+   * @returns {number} The resulting value.
+   */
+  addColumn(title = '', type) {
+    this.columnNames.push(title);
+    for (const row of this.data) row.push('');
+    return this.columnNames.length - 1;
+  }
+  /**
+   * Removes a column by name or index.
+   *
+   * @param {string|number|*} col - Column name or zero-based index.
+   *
+   * @returns {number} The resulting value.
+   */
+  removeColumn(col) {
+    const idx = this._colIndex(col);
+    this.columnNames.splice(idx, 1);
+    for (const row of this.data) row.splice(idx, 1);
+    return idx;
+  }
+  /**
+   * Appends a row.
+   *
+   * @param {Array} [rowArray=[]] - Rowarray value.
+   *
+   * @returns {number} The resulting value.
+   */
+  addRow(rowArray = []) {
+    this.data.push(rowArray.slice());
+    return this.data.length - 1;
+  }
+  /**
+   * Removes and returns a row.
+   *
+   * @param {number} index - Index value.
+   *
+   * @returns {Array|undefined} The resulting value.
+   */
+  removeRow(index) { return this.data.splice(index, 1)[0]; }
+  /**
+   * Removes all rows.
+   *
+   * @returns {Table} This instance for chaining.
+   */
+  clearRows() { this.data = []; return this; }
+
+  /**
+   * Returns the image, a cropped image, or a pixel value.
+   *
+   * @param {number} row - Zero-based row index.
+   * @param {string|number|*} col - Column name or zero-based index.
+   *
+   * @returns {Images|number[]} The resulting value.
+   */
+  get(row, col) { return this.data[row][this._colIndex(col)]; }
+  /**
+   * Returns a cell converted to a number.
+   *
+   * @param {number} row - Zero-based row index.
+   * @param {string|number|*} col - Column name or zero-based index.
+   *
+   * @returns {number} The resulting value.
+   */
+  getNum(row, col) { return parseFloat(this.get(row, col)); }
+  /**
+   * Returns a cell converted to text.
+   *
+   * @param {number} row - Zero-based row index.
+   * @param {string|number|*} col - Column name or zero-based index.
+   *
+   * @returns {*} The resulting value.
+   */
+  getString(row, col) { return String(this.get(row, col)); }
+  /**
+   * Sets one pixel from RGBA channels or a color-like object.
+   *
+   * @param {number} row - Zero-based row index.
+   * @param {string|number|*} col - Column name or zero-based index.
+   * @param {number} value - Value value.
+   *
+   * @returns {Images} The resulting value.
+   */
+  set(row, col, value) { this.data[row][this._colIndex(col)] = value; return this; }
+  /**
+   * Stores a numeric cell value.
+   *
+   * @param {number} row - Zero-based row index.
+   * @param {string|number|*} col - Column name or zero-based index.
+   * @param {number} value - Value value.
+   *
+   * @returns {*} The resulting value.
+   */
+  setNum(row, col, value) { return this.set(row, col, Number(value)); }
+  /**
+   * Stores a string cell value.
+   *
+   * @param {number} row - Zero-based row index.
+   * @param {string|number|*} col - Column name or zero-based index.
+   * @param {number} value - Value value.
+   *
+   * @returns {*} The resulting value.
+   */
+  setString(row, col, value) { return this.set(row, col, String(value)); }
+
+  /**
+   * Returns a copy of the values in a column.
+   *
+   * @param {string|number|*} col - Column name or zero-based index.
+   *
+   * @returns {Array} The resulting value.
+   */
+  getColumn(col) { const idx = this._colIndex(col); return this.data.map(r => r[idx]); }
+  /**
+   * Returns a copy of a row.
+   *
+   * @param {number} index - Index value.
+   *
+   * @returns {Array} The resulting value.
+   */
+  getRow(index) { return this.data[index].slice(); }
+  /**
+   * Returns indexed row descriptors.
+   *
+   * @returns {Object[]} The resulting value.
+   */
+  rows() { return this.data.map((r, i) => ({ index: i, values: r.slice() })); }
+
+  /**
+   * Returns a deep-enough row-wise copy of the table data.
+   *
+   * @returns {Array[]} The resulting value.
+   */
+  getArray() { return this.data.map(r => r.slice()); }
+  /**
+   * Converts rows to objects, optionally keyed by a column.
+   *
+   * @param {string|number|*} keyColumn - Keycolumn value.
+   *
+   * @returns {Object|Object[]} The resulting value.
+   */
+  getObject(keyColumn) {
+    if (keyColumn === undefined) return this.data.map(r => this._rowToObject(r));
+    const idx = this._colIndex(keyColumn);
+    const out = {};
+    for (const row of this.data) out[row[idx]] = this._rowToObject(row);
+    return out;
+  }
+  /**
+   * Converts one row to an object using column names.
+   *
+   * @param {number} row - Zero-based row index.
+   *
+   * @returns {Object} The resulting value.
+   */
+  _rowToObject(row) {
+    const obj = {};
+    this.columnNames.forEach((name, i) => { obj[name || i] = row[i]; });
+    return obj;
+  }
+
+  /**
+   * Finds the first row containing an exact value in a column.
+   *
+   * @param {number} value - Value value.
+   * @param {string|number|*} col - Column name or zero-based index.
+   *
+   * @returns {Array|null} The resulting value.
+   */
+  findRow(value, col) {
+    const idx = this._colIndex(col);
+    const i = this.data.findIndex(r => r[idx] === value);
+    return i === -1 ? null : this.getRow(i);
+  }
+  /**
+   * Finds all rows containing an exact value in a column.
+   *
+   * @param {number} value - Value value.
+   * @param {string|number|*} col - Column name or zero-based index.
+   *
+   * @returns {Array[]} The resulting value.
+   */
+  findRows(value, col) {
+    const idx = this._colIndex(col);
+    return this.data.filter(r => r[idx] === value).map(r => r.slice());
+  }
+  /**
+   * Finds the first row whose selected cell matches a regular expression.
+   *
+   * @param {string|number|*} regex - Regular-expression pattern.
+   * @param {string|number|*} col - Column name or zero-based index.
+   *
+   * @returns {Array|null} The resulting value.
+   */
+  matchRow(regex, col) {
+    const idx = this._colIndex(col);
+    const re = new RegExp(regex);
+    const row = this.data.find(r => re.test(r[idx]));
+    return row ? row.slice() : null;
+  }
+  /**
+   * Finds all rows whose selected cells match a regular expression.
+   *
+   * @param {string|number|*} regex - Regular-expression pattern.
+   * @param {string|number|*} col - Column name or zero-based index.
+   *
+   * @returns {Array[]} The resulting value.
+   */
+  matchRows(regex, col) {
+    const idx = this._colIndex(col);
+    const re = new RegExp(regex);
+    return this.data.filter(r => re.test(r[idx])).map(r => r.slice());
+  }
+  /**
+   * Removes selected characters from one or all columns.
+   *
+   * @param {string|number|*} tokens - Characters to remove.
+   * @param {string|number|*} col - Column name or zero-based index.
+   *
+   * @returns {*} The resulting value.
+   */
+  removeTokens(tokens, col) {
+    const cols = col === undefined ? this.columnNames.map((_, i) => i) : [this._colIndex(col)];
+    const re = new RegExp(`[${tokens.split('').map(c => '\\' + c).join('')}]`, 'g');
+    for (const row of this.data) for (const c of cols) row[c] = String(row[c]).replace(re, '');
+    return this;
+  }
+  /**
+   * Trims whitespace from every cell.
+   *
+   * @returns {Table} This instance for chaining.
+   */
+  trim() {
+    for (const row of this.data) {
+      for (let i = 0; i < row.length; i++) row[i] = String(row[i]).trim();
+    }
+    return this;
+  }
 }
 
-/**
- * Triggers a client-side download of a `Blob` under the given filename.
- * Used internally by {@link IO.save}/{@link IO.saveJSON}/{@link
- * IO.saveStrings}/{@link IO.saveTable}; no-ops (and returns `false`) outside
- * a browser (e.g. under Node), since there's no user to download a file to.
- *
- * @private
- * @param {Blob} blob - Data to save.
- * @param {string} filename - Filename (including extension) to save as.
- * @returns {boolean} `true` if a download was triggered, `false` otherwise.
- */
-function downloadBlob(blob, filename) {
-    if (typeof document === 'undefined' || typeof URL === 'undefined' || !URL.createObjectURL) return false;
+// ---------------------------------------------------------------------------
+// XML — minimal hand-written parser (no dependency), sufficient for basic
+// well-formed documents (elements, attributes, text content).
+// ---------------------------------------------------------------------------
+class XML {
+  /**
+   * Creates a new XML instance.
+   *
+   * @param {string|number|*} [name=''] - Name value.
+   * @param {string|number|*} [attributes={}] - Attributes value.
+   * @param {string|number|*} [parent=null] - Parent value.
+   */
+  constructor(name = '', attributes = {}, parent = null) {
+    this.name = name;
+    this.attributes = attributes;
+    this.parent = parent;
+    this.children = [];
+    this.content = '';
+  }
+  /**
+   * Parses an XML document into a tree.
+   *
+   * @param {string|number|*} str - Str value.
+   *
+   * @returns {XML} This instance for chaining.
+   */
+  static parse(str) {
+    let i = 0;
+    const len = str.length;
+    function skipProlog() {
+      while (str[i] === '<' && (str[i + 1] === '?' || str[i + 1] === '!')) {
+        const end = str.indexOf('>', i);
+        i = end + 1;
+        while (/\s/.test(str[i])) i++;
+      }
+    }
+    function parseAttributes(tag) {
+      const attrs = {};
+      const re = /([\w:-]+)\s*=\s*"([^"]*)"|([\w:-]+)\s*=\s*'([^']*)'/g;
+      let m;
+      while ((m = re.exec(tag))) {
+        if (m[1]) attrs[m[1]] = m[2]; else attrs[m[3]] = m[4];
+      }
+      return attrs;
+    }
+    function parseElement(parent) {
+      const openMatch = /^<([\w:-]+)((?:\s+[^>]*)?)\/?>/.exec(str.slice(i));
+      const tagStr = str.slice(i, str.indexOf('>', i) + 1);
+      const selfClosing = /\/>$/.test(tagStr);
+      const nameMatch = /^<([\w:-]+)/.exec(tagStr);
+      const name = nameMatch[1];
+      const attrs = parseAttributes(tagStr);
+      const node = new XML(name, attrs, parent);
+      i += tagStr.length;
+      if (selfClosing) return node;
+      while (i < len) {
+        if (str.slice(i, i + 2 + name.length + 1) === `</${name}>`) {
+          i += name.length + 3;
+          break;
+        }
+        if (str[i] === '<') {
+          node.children.push(parseElement(node));
+        } else {
+          const nextTag = str.indexOf('<', i);
+          node.content += str.slice(i, nextTag === -1 ? len : nextTag);
+          i = nextTag === -1 ? len : nextTag;
+        }
+      }
+      return node;
+    }
+    skipProlog();
+    while (i < len && str[i] !== '<') i++;
+    return parseElement(null);
+  }
 
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+  /**
+   * Returns the element name.
+   *
+   * @returns {string} The resulting value.
+   */
+  getName() { return this.name; }
+  /**
+   * Renames the XML element.
+   *
+   * @param {string|number|*} name - Name value.
+   *
+   * @returns {XML} This instance for chaining.
+   */
+  setName(name) { this.name = name; return this; }
+  /**
+   * Returns trimmed text content.
+   *
+   * @returns {string} The resulting value.
+   */
+  getContent() { return this.content.trim(); }
+  /**
+   * Returns the parent XML node.
+   *
+   * @returns {XML|null} The resulting value.
+   */
+  getParent() { return this.parent; }
+  /**
+   * Returns child nodes, optionally filtered by name.
+   *
+   * @param {string|number|*} name - Name value.
+   *
+   * @returns {XML[]} The resulting value.
+   */
+  getChildren(name) {
+    return name ? this.children.filter(c => c.name === name) : this.children.slice();
+  }
+  /**
+   * Returns a child by name or index.
+   *
+   * @param {string|number|*} nameOrIndex - Nameorindex value.
+   *
+   * @returns {XML|null} The resulting value.
+   */
+  getChild(nameOrIndex) {
+    if (typeof nameOrIndex === 'number') return this.children[nameOrIndex];
+    return this.children.find(c => c.name === nameOrIndex) || null;
+  }
+  /**
+   * Checks whether the node contains children.
+   *
+   * @returns {boolean} The resulting value.
+   */
+  hasChildren() { return this.children.length > 0; }
+  /**
+   * Lists child element names.
+   *
+   * @returns {string[]} The resulting value.
+   */
+  listChildren() { return this.children.map(c => c.name); }
+  /**
+   * Appends a child node and assigns its parent.
+   *
+   * @param {XML} child - Child value.
+   *
+   * @returns {XML} This instance for chaining.
+   */
+  addChild(child) { child.parent = this; this.children.push(child); return child; }
+  /**
+   * Removes a child by name or index.
+   *
+   * @param {string|number|*} nameOrIndex - Nameorindex value.
+   *
+   * @returns {XML|null} The resulting value.
+   */
+  removeChild(nameOrIndex) {
+    const idx = typeof nameOrIndex === 'number' ? nameOrIndex : this.children.findIndex(c => c.name === nameOrIndex);
+    return idx === -1 ? null : this.children.splice(idx, 1)[0];
+  }
+  /**
+   * Checks whether an attribute exists.
+   *
+   * @param {string|number|*} name - Name value.
+   *
+   * @returns {boolean} The resulting value.
+   */
+  hasAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name); }
+  /**
+   * Returns the number of attributes.
+   *
+   * @returns {number} The resulting value.
+   */
+  getAttributeCount() { return Object.keys(this.attributes).length; }
+  /**
+   * Lists attribute names.
+   *
+   * @returns {string[]} The resulting value.
+   */
+  listAttributes() { return Object.keys(this.attributes); }
+  /**
+   * Returns a cell converted to text.
+   *
+   * @param {string|number|*} name - Name value.
+   * @param {string|number|*} def - Def value.
+   *
+   * @returns {*} The resulting value.
+   */
+  getString(name, def) { return this.hasAttribute(name) ? this.attributes[name] : def; }
+  /**
+   * Returns a cell converted to a number.
+   *
+   * @param {string|number|*} name - Name value.
+   * @param {string|number|*} def - Def value.
+   *
+   * @returns {number} The resulting value.
+   */
+  getNum(name, def) { return this.hasAttribute(name) ? parseFloat(this.attributes[name]) : def; }
+  /**
+   * Sets an XML attribute.
+   *
+   * @param {string|number|*} name - Name value.
+   * @param {number} value - Value value.
+   *
+   * @returns {XML} This instance for chaining.
+   */
+  setAttribute(name, value) { this.attributes[name] = String(value); return this; }
+
+  /**
+   * Serializes the XML subtree with indentation.
+   *
+   * @param {number} [indent=0] - Indent value.
+   *
+   * @returns {string} The resulting value.
+   */
+  serialize(indent = 0) {
+    const pad = '  '.repeat(indent);
+    const attrs = Object.entries(this.attributes).map(([k, v]) => ` ${k}="${v}"`).join('');
+    if (!this.children.length && !this.content.trim()) return `${pad}<${this.name}${attrs}/>`;
+    const inner = [
+      ...(this.content.trim() ? [pad + '  ' + this.content.trim()] : []),
+      ...this.children.map(c => c.serialize(indent + 1))
+    ].join('\n');
+    return `${pad}<${this.name}${attrs}>\n${inner}\n${pad}</${this.name}>`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DateTime — thin wrapper around the native Date object
+// ---------------------------------------------------------------------------
+class DateTime {
+  /**
+   * Creates a new DateTime instance.
+   *
+   * @param {string|number|*} [date=new Date(] - Date value.
+   */
+  constructor(date = new Date()) { this.date = date; }
+  /**
+   * Returns the local day of the month.
+   *
+   * @returns {number} The resulting value.
+   */
+  day() { return this.date.getDate(); }
+  /**
+   * Returns the local month number.
+   *
+   * @returns {number} The resulting value.
+   */
+  month() { return this.date.getMonth() + 1; }
+  /**
+   * Returns the local four-digit year.
+   *
+   * @returns {number} The resulting value.
+   */
+  year() { return this.date.getFullYear(); }
+  /**
+   * Returns the local hour.
+   *
+   * @returns {number} The resulting value.
+   */
+  hour() { return this.date.getHours(); }
+  /**
+   * Returns the local minute.
+   *
+   * @returns {number} The resulting value.
+   */
+  minute() { return this.date.getMinutes(); }
+  /**
+   * Returns the local second.
+   *
+   * @returns {number} The resulting value.
+   */
+  second() { return this.date.getSeconds(); }
+  /**
+   * Returns milliseconds since the Unix epoch.
+   *
+   * @returns {number} The resulting value.
+   */
+  millis() { return this.date.getTime(); }
+}
+
+// ---------------------------------------------------------------------------
+// IO — file + network operations
+// ---------------------------------------------------------------------------
+class Writer {
+  /**
+   * Creates a new Writer instance.
+   *
+   * @param {string|number|*} filePath - Destination or source file path.
+   */
+  constructor(filePath) {
+    this.filePath = filePath;
+    this.lines = [];
+  }
+  /**
+   * Appends data to the writer buffer.
+   *
+   * @param {Buffer|Uint8Array|*} data - Data value.
+   *
+   * @returns {Writer} This instance for chaining.
+   */
+  write(data) { this.lines.push(Array.isArray(data) ? data.join('') : String(data)); return this; }
+  /**
+   * Flushes buffered data or closes a writer.
+   *
+   * @returns {Writer} This instance for chaining.
+   */
+  close() {
+    fs.writeFileSync(this.filePath, this.lines.join(''), 'utf8');
+    return this;
+  }
+}
+
+class IO {
+  /**
+   * Creates a buffered UTF-8 file writer.
+   *
+   * @param {string|number|*} filePath - Destination or source file path.
+   *
+   * @returns {Writer} The resulting value.
+   */
+  createWriter(filePath) { return new Writer(filePath); }
+
+  /**
+   * Loads and parses JSON from a file or URL.
+   *
+   * @param {string|number|*} pathOrUrl - Local file path or HTTP(S) URL.
+   *
+   * @returns {Promise<*>} A promise resolving to the requested result.
+   */
+  async loadJSON(pathOrUrl) {
+    const text = isURL(pathOrUrl)
+      ? await (await fetch(pathOrUrl)).text()
+      : fs.readFileSync(pathOrUrl, 'utf8');
+    return JSON.parse(text);
+  }
+  /**
+   * Serializes JSON to a UTF-8 file.
+   *
+   * @param {Object} json - Json value.
+   * @param {string|number|*} filePath - Destination or source file path.
+   * @param {boolean} [pretty=true] - Pretty value.
+   *
+   * @returns {boolean} The resulting value.
+   */
+  saveJSON(json, filePath, pretty = true) {
+    fs.writeFileSync(filePath, JSON.stringify(json, null, pretty ? 2 : 0), 'utf8');
     return true;
+  }
+
+  /**
+   * Loads text as an array of lines.
+   *
+   * @param {string|number|*} pathOrUrl - Local file path or HTTP(S) URL.
+   *
+   * @returns {Promise<string[]>} A promise resolving to the requested result.
+   */
+  async loadStrings(pathOrUrl) {
+    const text = isURL(pathOrUrl)
+      ? await (await fetch(pathOrUrl)).text()
+      : fs.readFileSync(pathOrUrl, 'utf8');
+    return text.split(/\r\n|\r|\n/);
+  }
+  /**
+   * Saves lines to a UTF-8 text file.
+   *
+   * @param {Array} lines - Lines value.
+   * @param {string|number|*} filePath - Destination or source file path.
+   *
+   * @returns {boolean} The resulting value.
+   */
+  saveStrings(lines, filePath) {
+    fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
+    return true;
+  }
+
+  /**
+   * Loads binary data from a file or URL.
+   *
+   * @param {string|number|*} pathOrUrl - Local file path or HTTP(S) URL.
+   *
+   * @returns {Promise<Buffer>} A promise resolving to the requested result.
+   */
+  async loadBytes(pathOrUrl) {
+    if (isURL(pathOrUrl)) return Buffer.from(await (await fetch(pathOrUrl)).arrayBuffer());
+    return fs.readFileSync(pathOrUrl);
+  }
+  /**
+   * Loads binary data as a Buffer.
+   *
+   * @param {string|number|*} pathOrUrl - Local file path or HTTP(S) URL.
+   *
+   * @returns {Promise<Buffer>} A promise resolving to the requested result.
+   */
+  async loadBlob(pathOrUrl) { return this.loadBytes(pathOrUrl); }
+
+  /**
+   * Loads CSV or TSV data into a table.
+   *
+   * @param {string|number|*} pathOrUrl - Local file path or HTTP(S) URL.
+   * @param {string|number|*} [format='csv'] - Input or output format.
+   * @param {boolean} [hasHeader=true] - Whether the first row contains column names.
+   *
+   * @returns {Promise<Table>} A promise resolving to the requested result.
+   */
+  async loadTable(pathOrUrl, format = 'csv', hasHeader = true) {
+    const text = isURL(pathOrUrl)
+      ? await (await fetch(pathOrUrl)).text()
+      : fs.readFileSync(pathOrUrl, 'utf8');
+    const delimiter = format === 'tsv' ? '\t' : ',';
+    return Table.fromCSV(text, delimiter, hasHeader);
+  }
+  /**
+   * Saves a table as CSV or TSV.
+   *
+   * @param {Table} table - Table value.
+   * @param {string|number|*} filePath - Destination or source file path.
+   * @param {string|number|*} [format='csv'] - Input or output format.
+   *
+   * @returns {boolean} The resulting value.
+   */
+  saveTable(table, filePath, format = 'csv') {
+    const delimiter = format === 'tsv' ? '\t' : ',';
+    fs.writeFileSync(filePath, table.toCSV(delimiter), 'utf8');
+    return true;
+  }
+
+  /**
+   * Loads and parses XML from a file or URL.
+   *
+   * @param {string|number|*} pathOrUrl - Local file path or HTTP(S) URL.
+   *
+   * @returns {Promise<XML>} A promise resolving to the requested result.
+   */
+  async loadXML(pathOrUrl) {
+    const text = isURL(pathOrUrl)
+      ? await (await fetch(pathOrUrl)).text()
+      : fs.readFileSync(pathOrUrl, 'utf8');
+    return XML.parse(text);
+  }
+
+  /**
+   * Performs an HTTP GET request.
+   *
+   * @param {string|number|*} url - Url value.
+   * @param {Object} [options={}] - Options value.
+   *
+   * @returns {Promise<*>} A promise resolving to the requested result.
+   */
+  async httpGet(url, options = {}) {
+    const res = await fetch(url, { ...options, method: 'GET' });
+    return this._parseResponse(res, options.dataType);
+  }
+  /**
+   * Performs an HTTP POST request.
+   *
+   * @param {string|number|*} url - Url value.
+   * @param {Buffer|Uint8Array|*} data - Data value.
+   * @param {Object} [options={}] - Options value.
+   *
+   * @returns {Promise<*>} A promise resolving to the requested result.
+   */
+  async httpPost(url, data, options = {}) {
+    const body = options.dataType === 'json' || (data && typeof data === 'object')
+      ? JSON.stringify(data)
+      : data;
+    const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+    const res = await fetch(url, { ...options, method: 'POST', body, headers });
+    return this._parseResponse(res, options.dataType);
+  }
+  /**
+   * Performs an HTTP request using the specified method.
+   *
+   * @param {string|number|*} url - Url value.
+   * @param {string|number|*} [method='GET'] - Method value.
+   * @param {Buffer|Uint8Array|*} data - Data value.
+   * @param {Object} [options={}] - Options value.
+   *
+   * @returns {Promise<*>} A promise resolving to the requested result.
+   */
+  async httpDo(url, method = 'GET', data, options = {}) {
+    const res = await fetch(url, { ...options, method, body: data ? JSON.stringify(data) : undefined });
+    return this._parseResponse(res, options.dataType);
+  }
+  /**
+   * Parses an HTTP response according to the requested data type.
+   *
+   * @param {string|number|*} res - Res value.
+   * @param {string|number|*} dataType - Expected response representation.
+   *
+   * @returns {Promise<*>} A promise resolving to the requested result.
+   */
+  async _parseResponse(res, dataType) {
+    if (dataType === 'text') return res.text();
+    if (dataType === 'binary') return Buffer.from(await res.arrayBuffer());
+    const text = await res.text();
+    try { return JSON.parse(text); } catch (e) { return text; }
+  }
+
+  /**
+   * Saves an image to disk.
+   *
+   * @param {Buffer|Uint8Array|*} data - Data value.
+   * @param {string|number|*} filePath - Destination or source file path.
+   *
+   * @returns {boolean|string} The resulting value.
+   */
+  save(data, filePath) {
+    if (Buffer.isBuffer(data)) { fs.writeFileSync(filePath, data); return true; }
+    if (typeof data === 'object') return this.saveJSON(data, filePath);
+    fs.writeFileSync(filePath, String(data), 'utf8');
+    return true;
+  }
+  /**
+   * Provides a no-op compatibility hook in headless Node.
+   *
+   * @returns {null} The resulting value.
+   */
+  setContent() {
+    // No DOM in Node; content targets are the caller's responsibility.
+    return null;
+  }
+  /**
+   * Flushes buffered data or closes a writer.
+   *
+   * @param {string|number|*} writer - Writer value.
+   *
+   * @returns {*} The resulting value.
+   */
+  close(writer) { if (writer instanceof Writer) writer.close(); return true; }
 }
 
-/**
- * Splits a filename into `{ name, extension }`, e.g. `'data.json'` ->
- * `{ name: 'data', extension: 'json' }`. A filename with no `.` falls back
- * to `defaultExtension` for the extension half.
- *
- * @private
- * @param {string} filename - Filename to split.
- * @param {string} defaultExtension - Extension to use if `filename` has none.
- * @returns {{name: string, extension: string}}
- */
-function splitExtension(filename, defaultExtension) {
-    const match = /^(.*)\.([^./\\]+)$/.exec(filename);
-    return match ? { name: match[1], extension: match[2] } : { name: filename, extension: defaultExtension };
-}
-
-/**
- * Naive CSV/TSV line splitter/joiner supporting double-quoted fields (with
- * `""` as an escaped quote) - enough for {@link IO.loadTable}/{@link
- * IO.saveTable} without pulling in a full CSV parsing dependency.
- *
- * @private
- */
-const Delimited = {
-    /**
-     * @param {string} text - Raw file contents.
-     * @param {string} separator - Field separator (`','` for CSV, `'\t'` for TSV).
-     * @returns {string[][]} Rows of string cells.
-     */
-    parse(text, separator) {
-        const rows = [];
-        let row = [];
-        let field = '';
-        let inQuotes = false;
-
-        const lines = text.replace(/\r\n/g, '\n').split('\n');
-        for (const line of lines) {
-            if (line === '' && !inQuotes && rows.length && row.length === 0 && field === '') continue;
-            for (let i = 0; i < line.length; i++) {
-                const ch = line[i];
-                if (inQuotes) {
-                    if (ch === '"' && line[i + 1] === '"') { field += '"'; i++; }
-                    else if (ch === '"') { inQuotes = false; }
-                    else { field += ch; }
-                } else if (ch === '"') {
-                    inQuotes = true;
-                } else if (ch === separator) {
-                    row.push(field);
-                    field = '';
-                } else {
-                    field += ch;
-                }
-            }
-            if (inQuotes) {
-                field += '\n';
-                continue;
-            }
-            row.push(field);
-            rows.push(row);
-            row = [];
-            field = '';
-        }
-        return rows;
-    },
-
-    /**
-     * @param {string[][]} rows - Rows of string cells.
-     * @param {string} separator - Field separator to join with.
-     * @returns {string} Delimited text, one row per line.
-     */
-    stringify(rows, separator) {
-        return rows.map(row => row.map(cell => {
-            const value = cell === null || cell === undefined ? '' : String(cell);
-            return /["\n]/.test(value) || value.includes(separator)
-                ? `"${value.replace(/"/g, '""')}"`
-                : value;
-        }).join(separator)).join('\n');
-    }
-};
-
-/**
- * A minimal p5.Table-like structure: an array of row objects plus the
- * column names, as produced by {@link IO.loadTable} and consumed by {@link
- * IO.saveTable}.
- *
- * @typedef {Object} Table
- * @property {string[]} columns - Column names, in file order.
- * @property {Object[]} rows - One plain object per data row, keyed by column name.
- */
-
-/**
- * A minimal p5.PrintWriter-like object returned by {@link IO.createWriter}.
- * Buffers lines in memory; nothing is saved to disk until {@link
- * IO.PrintWriter#close} (or {@link IO.PrintWriter#flush} for a live-updating
- * copy without ending the stream) is called.
- *
- * @class
- */
-class PrintWriter {
-    #name;
-    #extension;
-    #lines;
-
-    /**
-     * @param {string} name - Filename (without extension) to save as.
-     * @param {string} [extension='txt'] - File extension to save as.
-     */
-    constructor(name, extension = 'txt') {
-        this.#name = name;
-        this.#extension = extension;
-        this.#lines = [''];
-    }
-
-    /**
-     * Writes data to the print stream without adding a new line - each
-     * argument is appended, space-separated, to the end of the current
-     * last line.
-     *
-     * @param {...*} data - Values to write (stringified and space-joined).
-     * @returns {PrintWriter} This instance, to allow chaining.
-     */
-    write(...data) {
-        const text = data.map(String).join(' ');
-        this.#lines[this.#lines.length - 1] += text;
-        return this;
-    }
-
-    /**
-     * Writes data to the print stream, each argument ending its own line
-     * (i.e. like {@link PrintWriter#write} followed by a line break after
-     * every argument).
-     *
-     * @param {...*} data - Values to print, one per line.
-     * @returns {PrintWriter} This instance, to allow chaining.
-     */
-    print(...data) {
-        for (const value of data) {
-            this.#lines[this.#lines.length - 1] += String(value);
-            this.#lines.push('');
-        }
-        return this;
-    }
-
-    /**
-     * Saves the current buffered contents to a file without ending the
-     * stream - `write()`/`print()` can still be called afterwards.
-     *
-     * @returns {boolean} `true` if a download was triggered (browser only).
-     */
-    flush() {
-        const blob = new Blob([this.#lines.join('\n')], { type: 'text/plain' });
-        return downloadBlob(blob, `${this.#name}.${this.#extension}`);
-    }
-
-    /**
-     * Saves the file and closes the print stream. Further `write()`/
-     * `print()` calls are ignored after this.
-     *
-     * @returns {boolean} `true` if a download was triggered (browser only).
-     */
-    close() {
-        const saved = this.flush();
-        this.write = () => this;
-        this.print = () => this;
-        return saved;
-    }
-}
-
-const IO = {
-    // Exposed so callers can `instanceof IO.PrintWriter` or construct one
-    // directly, though createWriter() below is the normal entry point.
-    PrintWriter,
-
-    // -----------------------------------------------------------
-    // Writing
-    // -----------------------------------------------------------
-
-    /**
-     * Creates a new {@link PrintWriter} object for accumulating and later
-     * saving text output.
-     *
-     * @param {string} name - Filename (optionally including an extension, e.g. `'log.txt'`) to save as.
-     * @param {string} [extension='txt'] - File extension, used only if `name` doesn't already include one.
-     * @returns {PrintWriter} A new print stream.
-     */
-    createWriter(name, extension = 'txt') {
-        const { name: base, extension: ext } = splitExtension(name, extension);
-        return new PrintWriter(base, ext);
-    },
-
-    // -----------------------------------------------------------
-    // HTTP
-    // -----------------------------------------------------------
-
-    /**
-     * Method for executing an HTTP request. This is the general-purpose
-     * method that {@link IO.httpGet}/{@link IO.httpPost} wrap; use it
-     * directly for other methods (`PUT`, `DELETE`, ...) or when you need
-     * full control over the request.
-     *
-     * @param {string} path - URL to request.
-     * @param {string} [method='GET'] - HTTP method (`'GET'`, `'POST'`, `'PUT'`, `'DELETE'`, ...).
-     * @param {string} [datatype='text'] - How to parse the response: `'json'`, `'text'`, `'binary'` (ArrayBuffer), `'arrayBuffer'`, `'xml'`, or `'table'` (CSV/TSV, via {@link IO.loadTable}'s parser).
-     * @param {*} [data] - Request body. Objects are sent as JSON; strings/`FormData`/`Blob` are sent as-is.
-     * @param {function(*):void} [callback] - Called with the parsed response on success.
-     * @param {function(Error):void} [errorCallback] - Called with the error on failure.
-     * @returns {Promise<*>} Resolves with the parsed response (in addition to `callback` firing).
-     */
-    httpDo(path, method = 'GET', datatype = 'text', data, callback, errorCallback) {
-        // Signature is intentionally permissive about argument order/omission,
-        // matching p5.js's httpDo(path, [method], [datatype], [data], [callback], [errorCallback]).
-        const args = [method, datatype, data, callback, errorCallback];
-        const strings = ['GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'PATCH'];
-        method = strings.includes(args[0]) ? args[0] : 'GET';
-        datatype = typeof args[0] === 'string' && !strings.includes(args[0]) ? args[0]
-            : typeof args[1] === 'string' ? args[1] : 'text';
-        callback = args.find(a => typeof a === 'function' && a !== errorCallback);
-        errorCallback = args.slice().reverse().find(a => typeof a === 'function' && a !== callback);
-        data = args.find(a => a !== undefined && typeof a !== 'string' && typeof a !== 'function');
-
-        const options = { method };
-        if (data !== undefined) {
-            if (typeof FormData !== 'undefined' && data instanceof FormData) options.body = data;
-            else if (typeof Blob !== 'undefined' && data instanceof Blob) options.body = data;
-            else if (typeof data === 'string') options.body = data;
-            else {
-                options.body = JSON.stringify(data);
-                options.headers = { 'Content-Type': 'application/json' };
-            }
-        }
-
-        const promise = getFetch()(path, options)
-            .then(async response => {
-                if (!response.ok) throw new Error(`httpDo(): ${response.status} ${response.statusText} for ${path}`);
-                switch (datatype) {
-                    case 'json': return response.json();
-                    case 'binary':
-                    case 'arrayBuffer': return response.arrayBuffer();
-                    case 'xml': return IO._parseXML(await response.text());
-                    case 'table': return IO._parseTable(await response.text(), path);
-                    default: return response.text();
-                }
-            });
-
-        promise.then(result => callback && callback(result))
-            .catch(error => { if (errorCallback) errorCallback(error); else throw error; });
-
-        return promise;
-    },
-
-    /**
-     * Method for executing an HTTP GET request.
-     *
-     * @param {string} path - URL to request.
-     * @param {string} [datatype='text'] - How to parse the response (see {@link IO.httpDo}).
-     * @param {*} [data] - Query data. Plain objects are serialized and appended to `path` as a query string.
-     * @param {function(*):void} [callback] - Called with the parsed response on success.
-     * @param {function(Error):void} [errorCallback] - Called with the error on failure.
-     * @returns {Promise<*>} Resolves with the parsed response.
-     */
-    httpGet(path, datatype, data, callback, errorCallback) {
-        if (data && typeof data === 'object') {
-            const query = new URLSearchParams(data).toString();
-            path += (path.includes('?') ? '&' : '?') + query;
-            data = undefined;
-        }
-        return IO.httpDo(path, 'GET', datatype, data, callback, errorCallback);
-    },
-
-    /**
-     * Method for executing an HTTP POST request.
-     *
-     * @param {string} path - URL to request.
-     * @param {string} [datatype='text'] - How to parse the response (see {@link IO.httpDo}).
-     * @param {*} [data] - Request body (sent as JSON if a plain object).
-     * @param {function(*):void} [callback] - Called with the parsed response on success.
-     * @param {function(Error):void} [errorCallback] - Called with the error on failure.
-     * @returns {Promise<*>} Resolves with the parsed response.
-     */
-    httpPost(path, datatype, data, callback, errorCallback) {
-        return IO.httpDo(path, 'POST', datatype, data, callback, errorCallback);
-    },
-
-    // -----------------------------------------------------------
-    // Loading
-    // -----------------------------------------------------------
-
-    /**
-     * Loads a file at the given path as a `Blob`, then returns the
-     * resulting data (via Promise) or passes it to `callback`, if provided.
-     *
-     * @param {string} path - URL/path to the file.
-     * @param {function(Blob):void} [callback] - Called with the loaded `Blob` on success.
-     * @param {function(Error):void} [errorCallback] - Called with the error on failure.
-     * @returns {Promise<Blob>} Resolves with the loaded `Blob`.
-     */
-    loadBlob(path, callback, errorCallback) {
-        const promise = getFetch()(path).then(response => {
-            if (!response.ok) throw new Error(`loadBlob(): ${response.status} ${response.statusText} for ${path}`);
-            return response.blob();
-        });
-        promise.then(blob => callback && callback(blob))
-            .catch(error => { if (errorCallback) errorCallback(error); else throw error; });
-        return promise;
-    },
-
-    /**
-     * Loads a file at the given path as raw bytes. Suitable for fetching
-     * files up to 64MB.
-     *
-     * @param {string} path - URL/path to the file.
-     * @param {function(Uint8Array):void} [callback] - Called with the loaded bytes on success.
-     * @param {function(Error):void} [errorCallback] - Called with the error on failure.
-     * @returns {Promise<Uint8Array>} Resolves with the loaded bytes.
-     */
-    loadBytes(path, callback, errorCallback) {
-        const promise = getFetch()(path).then(async response => {
-            if (!response.ok) throw new Error(`loadBytes(): ${response.status} ${response.statusText} for ${path}`);
-            return new Uint8Array(await response.arrayBuffer());
-        });
-        promise.then(bytes => callback && callback(bytes))
-            .catch(error => { if (errorCallback) errorCallback(error); else throw error; });
-        return promise;
-    },
-
-    /**
-     * Loads a JSON file to create an Object (or Array).
-     *
-     * @param {string} path - URL/path to the `.json` file.
-     * @param {function(*):void} [callback] - Called with the parsed JSON on success.
-     * @param {function(Error):void} [errorCallback] - Called with the error on failure.
-     * @returns {Promise<*>} Resolves with the parsed JSON.
-     */
-    loadJSON(path, callback, errorCallback) {
-        return IO.httpDo(path, 'GET', 'json', undefined, callback, errorCallback);
-    },
-
-    /**
-     * Loads a text file to create an Array, one entry per line.
-     *
-     * @param {string} path - URL/path to the text file.
-     * @param {function(string[]):void} [callback] - Called with the array of lines on success.
-     * @param {function(Error):void} [errorCallback] - Called with the error on failure.
-     * @returns {Promise<string[]>} Resolves with the array of lines.
-     */
-    loadStrings(path, callback, errorCallback) {
-        const promise = IO.httpDo(path, 'GET', 'text').then(text => text.replace(/\r\n/g, '\n').split('\n'));
-        promise.then(lines => callback && callback(lines))
-            .catch(error => { if (errorCallback) errorCallback(error); else throw error; });
-        return promise;
-    },
-
-    /**
-     * Reads the contents of a file or URL and creates a {@link Table}
-     * object with its values. Supports CSV (`.csv`) and TSV (`.tsv`) by
-     * extension, or pass `'csv'`/`'tsv'` explicitly in `options`.
-     *
-     * @param {string} path - URL/path to the delimited file.
-     * @param {string|{separator: string, header: boolean}} [options] - `'csv'`/`'tsv'`, or an options object. `header` (default `true`) treats the first row as column names.
-     * @param {function(Table):void} [callback] - Called with the parsed table on success.
-     * @param {function(Error):void} [errorCallback] - Called with the error on failure.
-     * @returns {Promise<Table>} Resolves with the parsed table.
-     */
-    loadTable(path, options, callback, errorCallback) {
-        if (typeof options === 'function') { errorCallback = callback; callback = options; options = undefined; }
-        const promise = IO.httpDo(path, 'GET', 'text').then(text => IO._parseTable(text, path, options));
-        promise.then(table => callback && callback(table))
-            .catch(error => { if (errorCallback) errorCallback(error); else throw error; });
-        return promise;
-    },
-
-    /**
-     * Loads an XML file to create an XML document wrapper.
-     *
-     * @param {string} path - URL/path to the `.xml` file.
-     * @param {function(Object):void} [callback] - Called with the parsed XML wrapper on success.
-     * @param {function(Error):void} [errorCallback] - Called with the error on failure.
-     * @returns {Promise<Object>} Resolves with the parsed XML wrapper (see {@link IO._parseXML}).
-     */
-    loadXML(path, callback, errorCallback) {
-        const promise = IO.httpDo(path, 'GET', 'text').then(text => IO._parseXML(text));
-        promise.then(xml => callback && callback(xml))
-            .catch(error => { if (errorCallback) errorCallback(error); else throw error; });
-        return promise;
-    },
-
-    // -----------------------------------------------------------
-    // Saving
-    // -----------------------------------------------------------
-
-    /**
-     * Saves a given piece of data (image, text, JSON, CSV, or HTML) to the
-     * client's computer, inferring the format from `data`'s type and
-     * `filename`'s extension.
-     *
-     * @param {*} data - What to save: a string, an Array/Object (saved as JSON), a {@link Table} (saved as CSV/TSV), an `HTMLCanvasElement`/`Blob` (saved as an image), or an `HTMLElement` (saved as `.outerHTML`).
-     * @param {string} [filename='untitled'] - Filename (optionally including extension) to save as.
-     * @param {string} [extension] - File extension, used only if `filename` doesn't already include one; also selects the image format (`'png'`/`'jpg'`) for canvas data.
-     * @returns {boolean} `true` if a download was triggered (browser only).
-     */
-    save(data, filename = 'untitled', extension) {
-        if (typeof HTMLCanvasElement !== 'undefined' && data instanceof HTMLCanvasElement) {
-            const { name, extension: ext } = splitExtension(filename, extension || 'png');
-            const mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'image/png';
-            data.toBlob(blob => downloadBlob(blob, `${name}.${ext}`), mime);
-            return true;
-        }
-        if (typeof Blob !== 'undefined' && data instanceof Blob) {
-            const { name, extension: ext } = splitExtension(filename, extension || 'bin');
-            return downloadBlob(data, `${name}.${ext}`);
-        }
-        if (typeof HTMLElement !== 'undefined' && data instanceof HTMLElement) {
-            const { name, extension: ext } = splitExtension(filename, extension || 'html');
-            return downloadBlob(new Blob([data.outerHTML], { type: 'text/html' }), `${name}.${ext}`);
-        }
-        if (data && data.rows && data.columns) return IO.saveTable(data, filename, extension);
-        if (Array.isArray(data) && data.every(item => typeof item === 'string')) {
-            return IO.saveStrings(data, filename, extension);
-        }
-        if (typeof data === 'object' && data !== null) return IO.saveJSON(data, filename);
-        return IO.saveStrings([String(data)], filename, extension);
-    },
-
-    /**
-     * Saves an Object or Array to a JSON file.
-     *
-     * @param {*} json - Data to serialize.
-     * @param {string} [filename='data.json'] - Filename to save as.
-     * @param {boolean} [optimize=false] - When `true`, omits whitespace (`JSON.stringify` with no indentation) instead of pretty-printing.
-     * @returns {boolean} `true` if a download was triggered (browser only).
-     */
-    saveJSON(json, filename = 'data.json', optimize = false) {
-        const { name, extension } = splitExtension(filename, 'json');
-        const text = optimize ? JSON.stringify(json) : JSON.stringify(json, null, 2);
-        return downloadBlob(new Blob([text], { type: 'application/json' }), `${name}.${extension}`);
-    },
-
-    /**
-     * Saves an Array of Strings to a file, one per line.
-     *
-     * @param {string[]} list - Lines to save.
-     * @param {string} [filename='data.txt'] - Filename to save as.
-     * @param {string} [extension='txt'] - Extension used only if `filename` doesn't already include one.
-     * @returns {boolean} `true` if a download was triggered (browser only).
-     */
-    saveStrings(list, filename = 'data.txt', extension = 'txt') {
-        const { name, extension: ext } = splitExtension(filename, extension);
-        return downloadBlob(new Blob([list.join('\n')], { type: 'text/plain' }), `${name}.${ext}`);
-    },
-
-    /**
-     * Writes the contents of a {@link Table} object to a file (CSV by
-     * default, or TSV if `extension`/`filename` says `'tsv'`).
-     *
-     * @param {Table} table - Table to save.
-     * @param {string} [filename='table.csv'] - Filename to save as.
-     * @param {string} [extension='csv'] - `'csv'` or `'tsv'`, used only if `filename` doesn't already include one.
-     * @returns {boolean} `true` if a download was triggered (browser only).
-     */
-    saveTable(table, filename = 'table.csv', extension = 'csv') {
-        const { name, extension: ext } = splitExtension(filename, extension);
-        const separator = ext === 'tsv' ? '\t' : ',';
-        const rows = [table.columns, ...table.rows.map(row => table.columns.map(column => row[column]))];
-        const text = Delimited.stringify(rows, separator);
-        const mime = ext === 'tsv' ? 'text/tab-separated-values' : 'text/csv';
-        return downloadBlob(new Blob([text], { type: mime }), `${name}.${ext}`);
-    },
-
-    // -----------------------------------------------------------
-    // DOM content
-    // -----------------------------------------------------------
-
-    /**
-     * Sets an element's inner HTML content, optionally appending rather
-     * than replacing.
-     *
-     * @param {HTMLElement|string} element - Target element, or a CSS selector identifying one.
-     * @param {string} html - HTML/text content to set.
-     * @param {boolean} [append=false] - When `true`, appends to the existing content instead of replacing it.
-     * @returns {HTMLElement} The element that was updated.
-     * @throws {Error} If `element` is a selector that matches nothing, or no DOM is available.
-     */
-    setContent(element, html, append = false) {
-        if (typeof document === 'undefined') throw new Error('setContent() requires a DOM.');
-        const el = typeof element === 'string' ? document.querySelector(element) : element;
-        if (!el) throw new Error(`setContent(): no element found for "${element}".`);
-        if (append) el.innerHTML += html;
-        else el.innerHTML = html;
-        return el;
-    },
-
-    // -----------------------------------------------------------
-    // Internals
-    // -----------------------------------------------------------
-
-    /**
-     * Parses delimited (CSV/TSV) text into a {@link Table}, choosing the
-     * separator from `options.separator`/`options`, the file extension, or
-     * `path`'s extension, in that order of priority.
-     *
-     * @private
-     * @param {string} text - Raw file contents.
-     * @param {string} path - Original path/filename (used to infer the format when `options` doesn't specify one).
-     * @param {string|{separator: string, header: boolean}} [options] - `'csv'`/`'tsv'`, or `{separator, header}`.
-     * @returns {Table}
-     */
-    _parseTable(text, path, options) {
-        let separator = /\.tsv$/i.test(path) ? '\t' : ',';
-        let header = true;
-        if (typeof options === 'string') {
-            separator = options === 'tsv' ? '\t' : ',';
-        } else if (options && typeof options === 'object') {
-            if (options.separator) separator = options.separator;
-            if (options.header !== undefined) header = options.header;
-        }
-
-        const rows = Delimited.parse(text, separator).filter(row => row.length > 1 || row[0] !== '');
-        const columns = header && rows.length ? rows.shift() : (rows[0] || []).map((_, i) => `col${i}`);
-        return {
-            columns,
-            rows: rows.map(row => Object.fromEntries(columns.map((column, i) => [column, row[i] ?? ''])))
-        };
-    },
-
-    /**
-     * Parses XML text via `DOMParser` into a lightweight p5.XML-like
-     * wrapper around the root element.
-     *
-     * @private
-     * @param {string} text - Raw XML text.
-     * @returns {{doc: XMLDocument, root: Element, getContent: function(): string, getChildren: function(string=): Element[], getChild: function(string): ?Element, getAttribute: function(string): ?string}}
-     * @throws {Error} If no `DOMParser` is available, or the XML fails to parse.
-     */
-    _parseXML(text) {
-        if (typeof DOMParser === 'undefined') throw new Error('loadXML()/httpDo(datatype: "xml") requires a DOMParser.');
-        const doc = new DOMParser().parseFromString(text, 'application/xml');
-        const parserError = doc.querySelector('parsererror');
-        if (parserError) throw new Error(`Failed to parse XML: ${parserError.textContent}`);
-
-        const root = doc.documentElement;
-        return {
-            doc,
-            root,
-            getContent: () => root.textContent,
-            getChildren: (tag) => Array.from(tag ? root.getElementsByTagName(tag) : root.children),
-            getChild: (tag) => root.getElementsByTagName(tag)[0] || null,
-            getAttribute: (name) => root.getAttribute(name)
-        };
-    }
-};
-
-return IO;
-});
+module.exports = { IO, Table, XML, DateTime, Writer };

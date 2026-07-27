@@ -1,443 +1,654 @@
 'use strict';
 
-// Image: a portable RGBA pixel buffer, independent of any particular
-// canvas. Pixel operations (get/set/loadPixels/updatePixels/resize/
-// filter/mask/blend/copy) work directly on a plain Uint8ClampedArray, so
-// they run the same way in Node as in the browser - only the "get pixels
-// onto/off of the screen" edges (loadImage() from a URL, image()/draw()
-// onto a Canvas, save() to a file) need a real DOM/browser and degrade to
-// a clear error message under plain Node, the same way Canvas/DOM already
-// do elsewhere in this engine.
-//
-// Wrapped in the same IIFE pattern as the other engine files (see the
-// comment at the top of transform.js) so this can be loaded either as a
-// sibling <script> tag in the browser or via require() in Node.
-(function (root, factory) {
-    let ImageModule;
-    if (typeof module === 'object' && module.exports) {
-        ImageModule = factory(require('./color.js'));
-        module.exports = ImageModule;
-    } else {
-        if (!root || !root.Color) throw new Error('image.js requires color.js to be loaded first.');
-        ImageModule = factory(root.Color);
-        root.Image = ImageModule.Image;
-        root.loadImage = ImageModule.loadImage;
-        root.createImage = ImageModule.createImage;
-    }
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (Color) {
+const fs = require('fs');
+const zlib = require('zlib');
+const constants = require('./constants.js');
 
-const FILTERS = { THRESHOLD: 'threshold', GRAY: 'gray', OPAQUE: 'opaque', INVERT: 'invert', POSTERIZE: 'posterize', BLUR: 'blur' };
-const BLEND_MODES = { BLEND: 'blend', ADD: 'add', DARKEST: 'darkest', LIGHTEST: 'lightest', MULTIPLY: 'multiply', SCREEN: 'screen', DIFFERENCE: 'difference' };
+// ---------------------------------------------------------------------------
+// Minimal PNG encoder/decoder using only Node built-ins (zlib for
+// deflate/inflate, no p5, no native canvas). Supports 8-bit RGBA truecolor,
+// which covers everything this module needs to read/write.
+// ---------------------------------------------------------------------------
+const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 
 /**
- * A width x height buffer of RGBA pixels, stored as a flat
- * `Uint8ClampedArray` (four bytes per pixel, row-major, matching
- * `CanvasRenderingContext2D`'s `ImageData` layout) so it round-trips with
- * a real `<canvas>` for free in the browser, while every pixel-editing
- * method here works without one.
+ * Computes the CRC-32 checksum of a byte buffer.
  *
- * @class
+ * @param {Buffer|Uint8Array|*} buf - Source byte buffer.
+ *
+ * @returns {number} The resulting value.
  */
-class Image {
-    /**
-     * @param {number} [width=1]
-     * @param {number} [height=1]
-     */
-    constructor(width = 1, height = 1) {
-        this.width = Math.max(1, Math.floor(width));
-        this.height = Math.max(1, Math.floor(height));
-        /** @type {Uint8ClampedArray} Flat RGBA pixel data, `pixels[(y * width + x) * 4 + channel]`. Call {@link Image#loadPixels}/{@link Image#updatePixels} to sync with edits made another way (e.g. via {@link Image#copy}/{@link Image#mask}). */
-        this.pixels = new Uint8ClampedArray(this.width * this.height * 4);
-        this._frames = [{ data: this.pixels, delay: 100 }];
-        this._frameIndex = 0;
-        this._playing = false;
-    }
-
-    /**
-     * Loads the current pixel data into {@link Image#pixels} (a no-op for
-     * a plain Image, since `pixels` is always live - provided for API
-     * symmetry with `updatePixels()`, and so code written against a real
-     * canvas-backed image works unchanged here).
-     * @returns {Image} This instance, to allow chaining.
-     */
-    loadPixels() {
-        return this;
-    }
-
-    /**
-     * Confirms that in-place edits to {@link Image#pixels} should take
-     * effect (again, a no-op here - `pixels` is the single source of
-     * truth - kept for API symmetry).
-     * @returns {Image} This instance, to allow chaining.
-     */
-    updatePixels() {
-        return this;
-    }
-
-    _index(x, y) {
-        if (x < 0 || y < 0 || x >= this.width || y >= this.height) return -1;
-        return (Math.floor(y) * this.width + Math.floor(x)) * 4;
-    }
-
-    /**
-     * Gets a single pixel, or the whole image, as `Color`-compatible RGBA arrays.
-     * @param {number} [x] @param {number} [y]
-     * @returns {number[]|Image} `[r, g, b, a]` for a single pixel, or a copy of this whole Image when called with no arguments.
-     */
-    get(x, y) {
-        if (x === undefined) {
-            const copy = new Image(this.width, this.height);
-            copy.pixels.set(this.pixels);
-            return copy;
-        }
-        const i = this._index(x, y);
-        if (i < 0) return [0, 0, 0, 0];
-        return [this.pixels[i], this.pixels[i + 1], this.pixels[i + 2], this.pixels[i + 3]];
-    }
-
-    /**
-     * Sets the color of one pixel, or draws another Image into this one at `(x, y)`.
-     * @param {number} x @param {number} y
-     * @param {*|Image} value - Anything {@link Color.color} accepts, or another {@link Image} to stamp in at `(x, y)`.
-     * @returns {Image} This instance, to allow chaining.
-     */
-    set(x, y, value) {
-        if (value instanceof Image) {
-            this.copy(value, 0, 0, value.width, value.height, x, y, value.width, value.height);
-            return this;
-        }
-        const i = this._index(x, y);
-        if (i < 0) return this;
-        const c = Color.color(value);
-        this.pixels[i] = Color.red(c);
-        this.pixels[i + 1] = Color.green(c);
-        this.pixels[i + 2] = Color.blue(c);
-        this.pixels[i + 3] = Color.alpha(c);
-        return this;
-    }
-
-    /**
-     * Resizes the image, resampling with nearest-neighbor interpolation. `0` for either dimension scales it proportionally from the other.
-     * @param {number} width @param {number} height
-     * @returns {Image} This instance, to allow chaining.
-     */
-    resize(width, height) {
-        if (!width && !height) return this;
-        if (!width) width = Math.round((height / this.height) * this.width);
-        if (!height) height = Math.round((width / this.width) * this.height);
-        width = Math.max(1, Math.round(width));
-        height = Math.max(1, Math.round(height));
-
-        const out = new Uint8ClampedArray(width * height * 4);
-        for (let y = 0; y < height; y++) {
-            const srcY = Math.min(this.height - 1, Math.floor((y / height) * this.height));
-            for (let x = 0; x < width; x++) {
-                const srcX = Math.min(this.width - 1, Math.floor((x / width) * this.width));
-                const si = (srcY * this.width + srcX) * 4;
-                const di = (y * width + x) * 4;
-                out[di] = this.pixels[si]; out[di + 1] = this.pixels[si + 1];
-                out[di + 2] = this.pixels[si + 2]; out[di + 3] = this.pixels[si + 3];
-            }
-        }
-        this.width = width; this.height = height; this.pixels = out;
-        return this;
-    }
-
-    /**
-     * Copies a rectangular region from a source image (or this image, when
-     * called with 8 arguments and no `src`) into a region of this image,
-     * nearest-neighbor scaling if the two regions differ in size.
-     * @param {Image} [src] - Source image. Omit to copy within this image itself.
-     * @param {number} sx @param {number} sy @param {number} sw @param {number} sh
-     * @param {number} dx @param {number} dy @param {number} dw @param {number} dh
-     * @returns {Image} This instance, to allow chaining.
-     */
-    copy(...args) {
-        const hasSource = args[0] instanceof Image;
-        const [source, sX, sY, sW, sH, dX, dY, dW, dH] = hasSource ? args : [this, ...args];
-        // Snapshot the source first so a self-copy (source === this) with
-        // overlapping regions never reads pixels this same call already wrote.
-        const srcSnapshot = source === this ? source.get() : source;
-
-        for (let y = 0; y < dH; y++) {
-            const fromY = sY + Math.floor((y / dH) * sH);
-            for (let x = 0; x < dW; x++) {
-                const fromX = sX + Math.floor((x / dW) * sW);
-                const si = srcSnapshot._index(fromX, fromY);
-                if (si < 0) continue;
-                const di = this._index(dX + x, dY + y);
-                if (di < 0) continue;
-                this.pixels[di] = srcSnapshot.pixels[si]; this.pixels[di + 1] = srcSnapshot.pixels[si + 1];
-                this.pixels[di + 2] = srcSnapshot.pixels[si + 2]; this.pixels[di + 3] = srcSnapshot.pixels[si + 3];
-            }
-        }
-        return this;
-    }
-
-    /**
-     * Blends a region of a source image into a region of this image using a blend mode, scaling if the regions differ in size.
-     * @param {Image} src @param {number} sx @param {number} sy @param {number} sw @param {number} sh
-     * @param {number} dx @param {number} dy @param {number} dw @param {number} dh
-     * @param {string} mode - One of {@link Image.BLEND_MODES} (`'blend'`, `'add'`, `'darkest'`, `'lightest'`, `'multiply'`, `'screen'`, `'difference'`).
-     * @returns {Image} This instance, to allow chaining.
-     */
-    blend(src, sx, sy, sw, sh, dx, dy, dw, dh, mode = BLEND_MODES.BLEND) {
-        const blend1 = (a, b) => {
-            switch (mode) {
-                case BLEND_MODES.ADD: return a + b;
-                case BLEND_MODES.DARKEST: return Math.min(a, b);
-                case BLEND_MODES.LIGHTEST: return Math.max(a, b);
-                case BLEND_MODES.MULTIPLY: return (a * b) / 255;
-                case BLEND_MODES.SCREEN: return 255 - ((255 - a) * (255 - b)) / 255;
-                case BLEND_MODES.DIFFERENCE: return Math.abs(a - b);
-                default: return b;
-            }
-        };
-        for (let y = 0; y < dh; y++) {
-            const fromY = sy + Math.floor((y / dh) * sh);
-            for (let x = 0; x < dw; x++) {
-                const fromX = sx + Math.floor((x / dw) * sw);
-                const si = src._index(fromX, fromY);
-                const di = this._index(dx + x, dy + y);
-                if (si < 0 || di < 0) continue;
-                this.pixels[di] = blend1(this.pixels[di], src.pixels[si]);
-                this.pixels[di + 1] = blend1(this.pixels[di + 1], src.pixels[si + 1]);
-                this.pixels[di + 2] = blend1(this.pixels[di + 2], src.pixels[si + 2]);
-                this.pixels[di + 3] = Math.max(this.pixels[di + 3], src.pixels[si + 3]);
-            }
-        }
-        return this;
-    }
-
-    /**
-     * Masks this image with another same-sized image's alpha (or brightness, if fully opaque) channel.
-     * @param {Image} maskImage
-     * @returns {Image} This instance, to allow chaining.
-     */
-    mask(maskImage) {
-        for (let i = 0, n = this.pixels.length / 4; i < n; i++) {
-            const mi = i * 4;
-            const alpha = maskImage.pixels[mi + 3] < 255
-                ? maskImage.pixels[mi + 3]
-                : Math.round(0.299 * maskImage.pixels[mi] + 0.587 * maskImage.pixels[mi + 1] + 0.114 * maskImage.pixels[mi + 2]);
-            this.pixels[mi + 3] = Math.round((this.pixels[mi + 3] * alpha) / 255);
-        }
-        return this;
-    }
-
-    /**
-     * Applies an image filter in place.
-     * @param {string} type - One of {@link Image.FILTERS}.
-     * @param {number} [param] - `THRESHOLD` cutoff (`0`-`1`, default `0.5`) or `POSTERIZE` level count (default `4`); ignored by other filters.
-     * @returns {Image} This instance, to allow chaining.
-     */
-    filter(type, param) {
-        const p = this.pixels;
-        switch (type) {
-            case FILTERS.GRAY:
-                for (let i = 0; i < p.length; i += 4) {
-                    const g = 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2];
-                    p[i] = p[i + 1] = p[i + 2] = g;
-                }
-                break;
-            case FILTERS.INVERT:
-                for (let i = 0; i < p.length; i += 4) { p[i] = 255 - p[i]; p[i + 1] = 255 - p[i + 1]; p[i + 2] = 255 - p[i + 2]; }
-                break;
-            case FILTERS.OPAQUE:
-                for (let i = 3; i < p.length; i += 4) p[i] = 255;
-                break;
-            case FILTERS.THRESHOLD: {
-                const cutoff = (param ?? 0.5) * 255;
-                for (let i = 0; i < p.length; i += 4) {
-                    const g = 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2];
-                    const v = g >= cutoff ? 255 : 0;
-                    p[i] = p[i + 1] = p[i + 2] = v;
-                }
-                break;
-            }
-            case FILTERS.POSTERIZE: {
-                const levels = Math.max(2, Math.round(param ?? 4));
-                const step = 255 / (levels - 1);
-                for (let i = 0; i < p.length; i += 4) {
-                    p[i] = Math.round(Math.round(p[i] / step) * step);
-                    p[i + 1] = Math.round(Math.round(p[i + 1] / step) * step);
-                    p[i + 2] = Math.round(Math.round(p[i + 2] / step) * step);
-                }
-                break;
-            }
-            case FILTERS.BLUR: {
-                const radius = Math.max(1, Math.round(param ?? 1));
-                const src = this.pixels.slice();
-                for (let y = 0; y < this.height; y++) {
-                    for (let x = 0; x < this.width; x++) {
-                        let r = 0, g = 0, b = 0, a = 0, count = 0;
-                        for (let ky = -radius; ky <= radius; ky++) {
-                            for (let kx = -radius; kx <= radius; kx++) {
-                                const si = this._index(x + kx, y + ky);
-                                if (si < 0) continue;
-                                r += src[si]; g += src[si + 1]; b += src[si + 2]; a += src[si + 3]; count++;
-                            }
-                        }
-                        const di = this._index(x, y);
-                        p[di] = r / count; p[di + 1] = g / count; p[di + 2] = b / count; p[di + 3] = a / count;
-                    }
-                }
-                break;
-            }
-            default:
-                throw new Error(`Image#filter(): unknown filter type "${type}". Use one of ${Object.values(FILTERS).join(', ')}.`);
-        }
-        return this;
-    }
-
-    /**
-     * Tints the image by multiplying every pixel's RGB by a color (alpha of the tint color scales the image's own alpha).
-     * @param {*} color
-     * @returns {Image} This instance, to allow chaining.
-     */
-    tint(color) {
-        const c = Color.color(color);
-        const [tr, tg, tb, ta] = [Color.red(c) / 255, Color.green(c) / 255, Color.blue(c) / 255, Color.alpha(c) / 255];
-        const p = this.pixels;
-        for (let i = 0; i < p.length; i += 4) {
-            p[i] *= tr; p[i + 1] *= tg; p[i + 2] *= tb; p[i + 3] *= ta;
-        }
-        return this;
-    }
-
-    /**
-     * Removes any tint previously applied, by re-deriving pixel values from... actually tint() is destructive here (matching how a real GPU tint is a rendering-time effect, not stored separately) - noTint() is a no-op on a plain Image and only meaningful when this Image is being drawn onto a canvas via {@link Image#draw} with a tint argument.
-     * @returns {Image} This instance, to allow chaining.
-     */
-    noTint() {
-        return this;
-    }
-
-    /**
-     * Draws this image onto a {@link Canvas}'s 2D context.
-     * @param {Canvas} canvas - A Canvas already created with a `'2d'` context.
-     * @param {number} [dx=0] @param {number} [dy=0] @param {number} [dw=this.width] @param {number} [dh=this.height]
-     * @returns {Image} This instance, to allow chaining.
-     * @throws {Error} Outside a browser, or if `ImageData` isn't available.
-     */
-    draw(canvas, dx = 0, dy = 0, dw = this.width, dh = this.height) {
-        if (typeof ImageData === 'undefined') throw new Error('Image#draw() requires a browser (ImageData is not available in this environment).');
-        const ctx = canvas.context();
-        const imageData = new ImageData(new Uint8ClampedArray(this.pixels), this.width, this.height);
-        if (dw === this.width && dh === this.height) {
-            ctx.putImageData(imageData, dx, dy);
-            return this;
-        }
-        // putImageData() can't scale - draw through an offscreen canvas instead.
-        const off = document.createElement('canvas');
-        off.width = this.width; off.height = this.height;
-        off.getContext('2d').putImageData(imageData, 0, 0);
-        ctx.drawImage(off, dx, dy, dw, dh);
-        return this;
-    }
-
-    // -----------------------------------------------------------------
-    // Animated GIF-style frame support (multi-frame images).
-    // -----------------------------------------------------------------
-
-    /** @returns {number} The number of frames in this image (`1` unless frames were added, e.g. via a GIF loader). */
-    numFrames() {
-        return this._frames.length;
-    }
-
-    /** @returns {number} The index of the current frame. */
-    getCurrentFrame() {
-        return this._frameIndex;
-    }
-
-    /**
-     * Sets the current frame, swapping {@link Image#pixels} to that frame's data.
-     * @param {number} index
-     * @returns {Image} This instance, to allow chaining.
-     */
-    setFrame(index) {
-        if (index < 0 || index >= this._frames.length) throw new Error(`Image#setFrame(): index ${index} out of range (0-${this._frames.length - 1}).`);
-        this._frames[this._frameIndex].data = this.pixels;
-        this._frameIndex = index;
-        this.pixels = this._frames[index].data;
-        return this;
-    }
-
-    /**
-     * Changes the delay before advancing away from a given frame.
-     * @param {number} index @param {number} delayMs
-     * @returns {Image} This instance, to allow chaining.
-     */
-    delay(index, delayMs) {
-        if (this._frames[index]) this._frames[index].delay = delayMs;
-        return this;
-    }
-
-    /** Advances to the next frame, looping back to the first after the last. @returns {Image} This instance, to allow chaining. */
-    _advanceFrame() {
-        return this.setFrame((this._frameIndex + 1) % this._frames.length);
-    }
-
-    /** Restarts playback at the first frame. @returns {Image} This instance, to allow chaining. */
-    reset() {
-        return this.setFrame(0);
-    }
-
-    /** Plays a multi-frame image's animation (advancing frames automatically over time, if driven by an external tick - see {@link Image#pause}). @returns {Image} This instance, to allow chaining. */
-    play() {
-        this._playing = true;
-        return this;
-    }
-
-    /** Pauses playback started by {@link Image#play}. @returns {Image} This instance, to allow chaining. */
-    pause() {
-        this._playing = false;
-        return this;
-    }
+function crc32(buf) {
+  let crc = ~0;
+  /**
+   * Performs the for operation.
+   *
+   * @param {string|number|*} [let i=0; i < buf.length; i++] - Let i value.
+   *
+   * @returns {*} The resulting value.
+   */
+  for (let i = 0; i < buf.length; i++) {
+    crc ^= buf[i];
+    for (let j = 0; j < 8; j++) crc = (crc >>> 1) ^ (0xEDB88320 & -(crc & 1));
+  }
+  return ~crc >>> 0;
+}
+/**
+ * Builds a complete PNG chunk including its length and checksum.
+ *
+ * @param {string|number|*} type - Type value.
+ * @param {Buffer|Uint8Array|*} data - Data value.
+ *
+ * @returns {Buffer} The resulting value.
+ */
+function pngChunk(type, data) {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length, 0);
+  const typeBuf = Buffer.from(type, 'ascii');
+  const crcBuf = Buffer.alloc(4);
+  crcBuf.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])), 0);
+  return Buffer.concat([len, typeBuf, data, crcBuf]);
 }
 
 /**
- * Creates a new, blank (fully transparent) Image.
- * @param {number} [width=1] @param {number} [height=1]
- * @returns {Image}
+ * Encodes an 8-bit RGBA pixel buffer as a PNG file.
+ *
+ * @param {number} width - Width value.
+ * @param {number} height - Height value.
+ * @param {string|number|*} rgba /* Uint8ClampedArray/Buffer - Rgba /* uint8clampedarray/buffer value.
+ *
+ * @returns {Buffer} The resulting value.
  */
-function createImage(width, height) {
-    return new Image(width, height);
+function encodePNG(width, height, rgba /* Uint8ClampedArray/Buffer, length w*h*4 */) {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;   // bit depth
+  ihdr[9] = 6;   // color type: RGBA
+  ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+
+  // raw scanlines, each prefixed with filter byte 0 (none)
+  const stride = width * 4;
+  const raw = Buffer.alloc((stride + 1) * height);
+  /**
+   * Performs the for operation.
+   *
+   * @param {string|number|*} [let y=0; y < height; y++] - Let y value.
+   *
+   * @returns {*} The resulting value.
+   */
+  for (let y = 0; y < height; y++) {
+    raw[y * (stride + 1)] = 0;
+    Buffer.from(rgba.buffer || rgba, rgba.byteOffset || 0).copy(
+      raw, y * (stride + 1) + 1, y * stride, y * stride + stride
+    );
+  }
+  const idat = zlib.deflateSync(raw);
+
+  return Buffer.concat([
+    PNG_SIGNATURE,
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', idat),
+    pngChunk('IEND', Buffer.alloc(0))
+  ]);
 }
 
 /**
- * Loads an image from a URL and resolves it as a pixel-populated {@link
- * Image}. Browser-only (decodes via an `HTMLImageElement` onto an
- * offscreen canvas to read its pixels back).
+ * Reads core image metadata from a PNG header.
  *
- * @param {string} src - Image URL (or data: URI).
- * @returns {Promise<Image>}
+ * @param {Buffer|Uint8Array|*} buf - Source byte buffer.
+ *
+ * @throws {Error} If the buffer does not contain a PNG signature.
+ *
+ * @returns {{width:number,height:number,bitDepth:number,colorType:number}} The resulting value.
  */
-function loadImage(src) {
-    // NOTE: checks `window.Image` (the browser's built-in HTMLImageElement
-    // constructor), not the bare identifier `Image` - the class declared
-    // above in this same module scope is *also* named `Image`, which would
-    // always shadow and satisfy a bare `typeof Image` check.
-    if (typeof document === 'undefined' || typeof window === 'undefined' || typeof window.Image === 'undefined') {
-        return Promise.reject(new Error('loadImage() requires a browser environment to decode image files.'));
+function decodePNGHeader(buf) {
+  /**
+   * Performs the if operation.
+   *
+   * @param {string|number|*} !buf.slice(0, 8 - !buf.slice(0, 8 value.
+   *
+   * @returns {*} The resulting value.
+   */
+  if (!buf.slice(0, 8).equals(PNG_SIGNATURE)) throw new Error('Not a PNG file');
+  const width = buf.readUInt32BE(16);
+  const height = buf.readUInt32BE(20);
+  const bitDepth = buf[24];
+  const colorType = buf[25];
+  return { width, height, bitDepth, colorType };
+}
+
+/**
+ * Returns the Paeth predictor used by PNG scanline filtering.
+ *
+ * @param {number} a - A value.
+ * @param {number} b - B value.
+ * @param {string|number|*} c - C value.
+ *
+ * @returns {number} The resulting value.
+ */
+function paeth(a, b, c) {
+  const p = a + b - c;
+  const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+  /**
+   * Performs the if operation.
+   *
+   * @param {string|number|*} [pa <=pb && pa <= pc] - Pa < value.
+   *
+   * @returns {*} The resulting value.
+   */
+  if (pa <= pb && pa <= pc) return a;
+  /**
+   * Performs the if operation.
+   *
+   * @param {string|number|*} [pb <=pc] - Pb < value.
+   *
+   * @returns {*} The resulting value.
+   */
+  if (pb <= pc) return b;
+  return c;
+}
+
+/** Decodes an 8-bit RGB/RGBA PNG (no interlacing) into a flat RGBA buffer. */
+/**
+ * Decodes a non-interlaced 8-bit PNG into RGBA pixels.
+ *
+ * @param {Buffer|Uint8Array|*} buf - Source byte buffer.
+ *
+ * @throws {Error} If the PNG uses an unsupported bit depth.
+ *
+ * @returns {{width:number,height:number,pixels:Buffer}} The resulting value.
+ */
+function decodePNG(buf) {
+  const { width, height, bitDepth, colorType } = decodePNGHeader(buf);
+  /**
+   * Performs the if operation.
+   *
+   * @param {string|number|*} [bitDepth !== 8] - Bitdepth ! value.
+   *
+   * @returns {*} The resulting value.
+   */
+  if (bitDepth !== 8) throw new Error('decodePNG: only 8-bit PNGs are supported');
+  const channels = colorType === 6 ? 4 : colorType === 2 ? 3 : 1;
+
+  let idatChunks = [];
+  let offset = 8;
+  /**
+   * Performs the while operation.
+   *
+   * @param {string|number|*} offset < buf.length - Offset < buf.length value.
+   *
+   * @returns {*} The resulting value.
+   */
+  while (offset < buf.length) {
+    const len = buf.readUInt32BE(offset);
+    const type = buf.toString('ascii', offset + 4, offset + 8);
+    const data = buf.slice(offset + 8, offset + 8 + len);
+    if (type === 'IDAT') idatChunks.push(data);
+    offset += 8 + len + 4;
+  }
+  const raw = zlib.inflateSync(Buffer.concat(idatChunks));
+  const stride = width * channels;
+  const out = Buffer.alloc(width * height * 4);
+  let prevLine = Buffer.alloc(stride);
+
+  /**
+   * Performs the for operation.
+   *
+   * @param {string|number|*} [let y=0; y < height; y++] - Let y value.
+   *
+   * @returns {*} The resulting value.
+   */
+  for (let y = 0; y < height; y++) {
+    const rowStart = y * (stride + 1);
+    const filter = raw[rowStart];
+    const line = Buffer.from(raw.slice(rowStart + 1, rowStart + 1 + stride));
+    for (let x = 0; x < stride; x++) {
+      const a = x >= channels ? line[x - channels] : 0;
+      const b = prevLine[x];
+      const c = x >= channels ? prevLine[x - channels] : 0;
+      let val = line[x];
+      if (filter === 1) val = (val + a) & 255;
+      else if (filter === 2) val = (val + b) & 255;
+      else if (filter === 3) val = (val + Math.floor((a + b) / 2)) & 255;
+      else if (filter === 4) val = (val + paeth(a, b, c)) & 255;
+      line[x] = val;
     }
-    return new Promise((resolve, reject) => {
-        const el = new window.Image();
-        el.crossOrigin = 'anonymous';
-        el.onload = () => {
-            const off = document.createElement('canvas');
-            off.width = el.naturalWidth; off.height = el.naturalHeight;
-            const ctx = off.getContext('2d');
-            ctx.drawImage(el, 0, 0);
-            const data = ctx.getImageData(0, 0, off.width, off.height);
-            const img = createImage(off.width, off.height);
-            img.pixels.set(data.data);
-            resolve(img);
-        };
-        el.onerror = () => reject(new Error(`loadImage(): failed to load "${src}".`));
-        el.src = src;
+    for (let x = 0; x < width; x++) {
+      const si = x * channels, di = (y * width + x) * 4;
+      out[di] = line[si];
+      out[di + 1] = channels >= 3 ? line[si + 1] : line[si];
+      out[di + 2] = channels >= 3 ? line[si + 2] : line[si];
+      out[di + 3] = channels === 4 ? line[si + 3] : 255;
+    }
+    prevLine = line;
+  }
+  return { width, height, pixels: out };
+}
+
+// ---------------------------------------------------------------------------
+// Images / Pixels
+// ---------------------------------------------------------------------------
+class Images {
+  /**
+   * Creates a new Images instance.
+   *
+   * @param {number} [width=0] - Width value.
+   * @param {number} [height=0] - Height value.
+   */
+  constructor(width = 0, height = 0) {
+    this._width = width;
+    this._height = height;
+    this._pixels = Buffer.alloc(width * height * 4, 0);
+    this._tintColor = null;
+    this._loaded = width > 0 && height > 0;
+  }
+  /**
+   * Returns the current width value.
+   *
+   * @returns {number} The resulting value.
+   */
+  get width() { return this._width; }
+  /**
+   * Returns the current height value.
+   *
+   * @returns {number} The resulting value.
+   */
+  get height() { return this._height; }
+
+  /**
+   * Creates a blank RGBA image.
+   *
+   * @param {number} w - W value.
+   * @param {number} h - H value.
+   *
+   * @returns {Images} This instance for chaining.
+   */
+  createImage(w, h) { return new Images(w, h); }
+
+  /**
+   * Loads and decodes a PNG image from disk.
+   *
+   * @param {string|number|*} filePath - Destination or source file path.
+   *
+   * @throws {Error} If the source is not a PNG image.
+   *
+   * @returns {Images} This instance for chaining.
+   */
+  loadImage(filePath) {
+    const buf = fs.readFileSync(filePath);
+    if (buf.slice(0, 4).toString('hex') !== '89504e47') {
+      throw new Error('loadImage: only PNG is supported by this headless implementation');
+    }
+    const { width, height, pixels } = decodePNG(buf);
+    const img = new Images(width, height);
+    img._pixels = pixels;
+    img._loaded = true;
+    return img;
+  }
+
+  /**
+   * Encodes and saves an image as PNG.
+   *
+   * @param {Images} img - Img value.
+   * @param {string|number|*} filePath - Destination or source file path.
+   *
+   * @returns {string} The resulting value.
+   */
+  saveCanvas(img, filePath) {
+    const png = encodePNG(img.width, img.height, img.pixelsRef());
+    fs.writeFileSync(filePath, png);
+    return filePath;
+  }
+  /**
+   * Saves an image to disk.
+   *
+   * @param {Images} img - Img value.
+   * @param {string|number|*} filePath - Destination or source file path.
+   *
+   * @returns {boolean|string} The resulting value.
+   */
+  save(img, filePath) { return this.saveCanvas(img, filePath); }
+
+  /**
+   * Returns the underlying mutable pixel buffer.
+   *
+   * @returns {Buffer} The resulting value.
+   */
+  pixelsRef() { return this._pixels; }
+  /**
+   * Returns the current pixel buffer for direct access.
+   *
+   * @returns {Buffer} The resulting value.
+   */
+  loadPixels() { return this._pixels; }
+  /**
+   * Replaces the current pixel buffer.
+   *
+   * @param {Buffer|Uint8Array|*} pixels - Pixels value.
+   *
+   * @returns {Images} This instance for chaining.
+   */
+  updatePixels(pixels) { if (pixels) this._pixels = Buffer.from(pixels); return this; }
+
+  /**
+   * Returns the image, a cropped image, or a pixel value.
+   *
+   * @param {number} x - X value.
+   * @param {number} y - Y value.
+   * @param {number} w - W value.
+   * @param {number} h - H value.
+   *
+   * @returns {Images|number[]} The resulting value.
+   */
+  get(x, y, w, h) {
+    if (x === undefined) return this;
+    if (w !== undefined) {
+      const sub = new Images(w, h);
+      for (let row = 0; row < h; row++) {
+        this._pixels.copy(sub._pixels, row * w * 4, ((y + row) * this._width + x) * 4, ((y + row) * this._width + x + w) * 4);
+      }
+      return sub;
+    }
+    const i = (y * this._width + x) * 4;
+    return [this._pixels[i], this._pixels[i + 1], this._pixels[i + 2], this._pixels[i + 3]];
+  }
+  /**
+   * Sets one pixel from RGBA channels or a color-like object.
+   *
+   * @param {number} x - X value.
+   * @param {number} y - Y value.
+   * @param {number} value - Value value.
+   *
+   * @returns {Images} This instance for chaining.
+   */
+  set(x, y, value) {
+    const i = (y * this._width + x) * 4;
+    if (Array.isArray(value)) {
+      this._pixels[i] = value[0]; this._pixels[i + 1] = value[1];
+      this._pixels[i + 2] = value[2]; this._pixels[i + 3] = value[3] ?? 255;
+    } else if (value && typeof value.toArray === 'function') {
+      const [r, g, b, a] = value.toArray();
+      this._pixels[i] = r; this._pixels[i + 1] = g; this._pixels[i + 2] = b; this._pixels[i + 3] = a;
+    }
+    return this;
+  }
+  /**
+   * Returns an independent copy of the vector.
+   *
+   * @param {Images} src - Src value.
+   * @param {number} sx - Sx value.
+   * @param {number} sy - Sy value.
+   * @param {number} sw - Sw value.
+   * @param {number} sh - Sh value.
+   * @param {number} dx - Dx value.
+   * @param {number} dy - Dy value.
+   * @param {number} dw - Dw value.
+   * @param {number} dh - Dh value.
+   *
+   * @returns {Vector} The resulting value.
+   */
+  copy(src, sx, sy, sw, sh, dx, dy, dw, dh) {
+    for (let y = 0; y < dh; y++) {
+      for (let x = 0; x < dw; x++) {
+        const srcX = sx + Math.floor((x / dw) * sw);
+        const srcY = sy + Math.floor((y / dh) * sh);
+        this.set(dx + x, dy + y, src.get(srcX, srcY));
+      }
+    }
+    return this;
+  }
+  /**
+   * Blends a source image region into this image.
+   *
+   * @param {Images} src - Src value.
+   * @param {number} sx - Sx value.
+   * @param {number} sy - Sy value.
+   * @param {number} sw - Sw value.
+   * @param {number} sh - Sh value.
+   * @param {number} dx - Dx value.
+   * @param {number} dy - Dy value.
+   * @param {number} dw - Dw value.
+   * @param {number} dh - Dh value.
+   * @param {string|number|*} [mode=constants.BLEND] - Operation or rendering mode.
+   *
+   * @returns {Images} This instance for chaining.
+   */
+  blend(src, sx, sy, sw, sh, dx, dy, dw, dh, mode = constants.BLEND) {
+    for (let y = 0; y < dh; y++) {
+      for (let x = 0; x < dw; x++) {
+        const [sr, sg, sb, sa] = src.get(sx + x, sy + y);
+        const [dr, dg, db] = this.get(dx + x, dy + y);
+        const a = sa / 255;
+        const blended = mode === constants.MULTIPLY
+          ? [dr * sr / 255, dg * sg / 255, db * sb / 255]
+          : [dr + (sr - dr) * a, dg + (sg - dg) * a, db + (sb - db) * a];
+        this.set(dx + x, dy + y, [...blended.map(v => Math.round(v)), 255]);
+      }
+    }
+    return this;
+  }
+  /**
+   * Resizes the image using nearest-neighbor sampling.
+   *
+   * @param {number} w - W value.
+   * @param {number} h - H value.
+   *
+   * @returns {Images} This instance for chaining.
+   */
+  resize(w, h) {
+    const out = Buffer.alloc(w * h * 4);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const srcX = Math.min(this._width - 1, Math.floor((x / w) * this._width));
+        const srcY = Math.min(this._height - 1, Math.floor((y / h) * this._height));
+        const si = (srcY * this._width + srcX) * 4;
+        const di = (y * w + x) * 4;
+        out[di] = this._pixels[si]; out[di + 1] = this._pixels[si + 1];
+        out[di + 2] = this._pixels[si + 2]; out[di + 3] = this._pixels[si + 3];
+      }
+    }
+    this._width = w; this._height = h; this._pixels = out;
+    return this;
+  }
+  /**
+   * Applies an in-place image filter.
+   *
+   * @param {string|number|*} type - Type value.
+   * @param {number} param - Param value.
+   *
+   * @returns {Images} This instance for chaining.
+   */
+  filter(type, param) {
+    const n = this._width * this._height;
+    for (let i = 0; i < n; i++) {
+      const o = i * 4;
+      const [r, g, b, a] = [this._pixels[o], this._pixels[o + 1], this._pixels[o + 2], this._pixels[o + 3]];
+      if (type === constants.GRAY) {
+        const gray = Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b);
+        this._pixels[o] = this._pixels[o + 1] = this._pixels[o + 2] = gray;
+      } else if (type === constants.INVERT) {
+        this._pixels[o] = 255 - r; this._pixels[o + 1] = 255 - g; this._pixels[o + 2] = 255 - b;
+      } else if (type === constants.THRESHOLD) {
+        const level = (param ?? 0.5) * 255;
+        const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        const v = lum >= level ? 255 : 0;
+        this._pixels[o] = this._pixels[o + 1] = this._pixels[o + 2] = v;
+      } else if (type === constants.POSTERIZE) {
+        const levels = Math.max(2, Math.round(param || 4));
+        const step = 255 / (levels - 1);
+        this._pixels[o] = Math.round(Math.round(r / step) * step);
+        this._pixels[o + 1] = Math.round(Math.round(g / step) * step);
+        this._pixels[o + 2] = Math.round(Math.round(b / step) * step);
+      } else if (type === constants.OPAQUE) {
+        this._pixels[o + 3] = 255;
+      }
+    }
+    if (type === constants.BLUR) this._boxBlur(Math.max(1, Math.round(param || 1)));
+    return this;
+  }
+  /**
+   * Applies an in-place box blur.
+   *
+   * @param {number} radius - Radius value.
+   *
+   * @returns {*} The resulting value.
+   */
+  _boxBlur(radius) {
+    const w = this._width, h = this._height;
+    const src = Buffer.from(this._pixels);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        let r = 0, g = 0, b = 0, a = 0, count = 0;
+        for (let dy = -radius; dy <= radius; dy++) {
+          for (let dx = -radius; dx <= radius; dx++) {
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+            const si = (ny * w + nx) * 4;
+            r += src[si]; g += src[si + 1]; b += src[si + 2]; a += src[si + 3]; count++;
+          }
+        }
+        const di = (y * w + x) * 4;
+        this._pixels[di] = Math.round(r / count);
+        this._pixels[di + 1] = Math.round(g / count);
+        this._pixels[di + 2] = Math.round(b / count);
+        this._pixels[di + 3] = Math.round(a / count);
+      }
+    }
+  }
+  /**
+   * Replaces image alpha values using a mask image’s red channel.
+   *
+   * @param {Images} maskImg - Maskimg value.
+   *
+   * @returns {Images} This instance for chaining.
+   */
+  mask(maskImg) {
+    const n = this._width * this._height;
+    for (let i = 0; i < n; i++) {
+      this._pixels[i * 4 + 3] = maskImg.pixelsRef()[i * 4]; // use red channel as alpha
+    }
+    return this;
+  }
+  /**
+   * Stores tint arguments for subsequent rendering.
+   *
+   * @param {string|number|*} ...args - Args value.
+   *
+   * @returns {Images} This instance for chaining.
+   */
+  tint(...args) { this._tintColor = args; return this; }
+  /**
+   * Clears the current tint.
+   *
+   * @returns {Images} This instance for chaining.
+   */
+  noTint() { this._tintColor = null; return this; }
+  /**
+   * Returns this headless image instance.
+   *
+   * @returns {Images} This instance for chaining.
+   */
+  image() { return this; } // headless: no canvas to draw into; returns self for chaining
+  /**
+   * Provides a chainable image-mode compatibility method.
+   *
+   * @returns {Images} This instance for chaining.
+   */
+  imageMode() { return this; }
+  /**
+   * Returns the fixed headless pixel density.
+   *
+   * @returns {*} The resulting value.
+   */
+  pixelDensity() { return 1; }
+}
+
+class GIF {
+  /**
+   * Creates a new GIF instance.
+   *
+   * @param {Array} [frames=[]] - Frames value.
+   * @param {string|number|*} [delayMs=100] - Delayms value.
+   */
+  constructor(frames = [], delayMs = 100) {
+    this.frames = frames; // array of Images
+    this._delay = delayMs;
+    this._index = 0;
+    this._playing = false;
+  }
+  /**
+   * Gets or sets the delay between GIF frames.
+   *
+   * @param {number} ms - Ms value.
+   *
+   * @returns {GIF} This instance for chaining.
+   */
+  delay(ms) { if (ms === undefined) return this._delay; this._delay = ms; return this; }
+  /**
+   * Returns the number of frames.
+   *
+   * @returns {number} The resulting value.
+   */
+  numFrames() { return this.frames.length; }
+  /**
+   * Returns the active frame.
+   *
+   * @returns {Images} The resulting value.
+   */
+  getCurrentFrame() { return this.frames[this._index]; }
+  /**
+   * Selects a frame by its clamped index.
+   *
+   * @param {number} i - I value.
+   *
+   * @returns {GIF} This instance for chaining.
+   */
+  setFrame(i) { this._index = Math.max(0, Math.min(this.frames.length - 1, i)); return this; }
+  /**
+   * Resets playback to the first frame.
+   *
+   * @returns {GIF} This instance for chaining.
+   */
+  reset() { this._index = 0; return this; }
+  /**
+   * Starts animated playback.
+   *
+   * @returns {GIF} This instance for chaining.
+   */
+  play() { this._playing = true; return this; }
+  /**
+   * Pauses animated playback.
+   *
+   * @returns {GIF} This instance for chaining.
+   */
+  pause() { this._playing = false; return this; }
+  /**
+   * Advances playback to the next frame.
+   *
+   * @returns {number} The resulting value.
+   */
+  advance() {
+    if (!this._playing) return this._index;
+    this._index = (this._index + 1) % this.frames.length;
+    return this._index;
+  }
+  /**
+   * Saves every frame as a numbered PNG file.
+   *
+   * @param {string|number|*} dirPath - Dirpath value.
+   * @param {string|number|*} imagesInstance - Imagesinstance value.
+   *
+   * @returns {string[]} The resulting value.
+   */
+  saveFrames(dirPath, imagesInstance) {
+    const paths = this.frames.map((frame, i) => {
+      const filePath = `${dirPath}/frame_${String(i).padStart(3, '0')}.png`;
+      imagesInstance.saveCanvas(frame, filePath);
+      return filePath;
     });
+    return paths;
+  }
 }
 
-return { Image, createImage, loadImage, FILTERS, BLEND_MODES };
-});
+module.exports = { Images, GIF, encodePNG, decodePNG };

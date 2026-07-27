@@ -1,348 +1,393 @@
 'use strict';
 
-// Rendering: creating/resizing/removing the canvas surface a sketch draws
-// onto, plus off-main-canvas render targets - a plain in-memory p5.Graphics
-// buffer, and a WebGL p5.Framebuffer (render-to-texture). Built directly
-// on top of {@link Canvas}, which already owns the single "main" render
-// surface; Rendering adds the *additional* surfaces and the couple of
-// top-level entry points (createCanvas/createGraphics/createFramebuffer/...)
-// a sketch calls to get them.
-//
-// Wrapped in the same IIFE pattern as the other engine files (see the
-// comment at the top of transform.js) so this can be loaded either as a
-// sibling <script> tag in the browser or via require() in Node.
-(function (root, factory) {
-    let Rendering;
-    if (typeof module === 'object' && module.exports) {
-        Rendering = factory(require('./canvas.js'));
-        module.exports = Rendering;
-        module.exports.Rendering = Rendering;
+const constants = require('./constants.js');
+const { Images } = require('./image.js');
+const { Camera } = require('./3d.js');
+
+// ---------------------------------------------------------------------------
+// Rendering: manages the "canvas" surface(s) a sketch draws into. Headless
+// equivalent of p5's createCanvas()/createGraphics() family — there's no
+// real GPU/DOM <canvas> in Node, so a "canvas" here is just a Graphics
+// instance (an RGBA pixel buffer, see image.js's Images) plus a bit of
+// bookkeeping. Any real front-end (browser <canvas>, terminal renderer,
+// PNG export) can consume `drawingContext`/`pixels` afterwards.
+// ---------------------------------------------------------------------------
+class Rendering {
+  /**
+   * Creates a new Rendering instance.
+   */
+  constructor() {
+    this._canvas = null; // active Graphics instance, or null before createCanvas()
+    this._attributes = {
+      alpha: true,
+      depth: true,
+      stencil: true,
+      antialias: false,
+      premultipliedAlpha: false,
+      preserveDrawingBuffer: false,
+      perPixelLighting: true,
+      version: 2
+    };
+    this._depthBuffer = null;
+  }
+
+  /**
+   * Resets every value in the active depth buffer.
+   *
+   * @param {number} [depth=1] - Depth value.
+   *
+   * @returns {Rendering} This instance for chaining.
+   */
+  clearDepth(depth = 1) {
+    if (this._depthBuffer) this._depthBuffer.fill(depth);
+    return this;
+  }
+
+  /**
+   * Creates and activates the main drawing surface.
+   *
+   * @param {number} [width=100] - Width value.
+   * @param {number} [height=100] - Height value.
+   * @param {string} [renderer=constants.P2D] - Renderer value.
+   *
+   * @returns {Graphics} The resulting value.
+   */
+  createCanvas(width = 100, height = 100, renderer = constants.P2D) {
+    this._canvas = new Graphics(width, height, renderer);
+    if (renderer !== constants.P2D) {
+      this._depthBuffer = new Float32Array(width * height).fill(1);
+    }
+    return this._canvas;
+  }
+
+  /**
+   * Removes the active canvas and its depth buffer.
+   *
+   * @returns {Rendering} This instance for chaining.
+   */
+  noCanvas() {
+    this._canvas = null;
+    this._depthBuffer = null;
+    return this;
+  }
+
+  /**
+   * Resizes the active canvas and recreates its depth buffer when needed.
+   *
+   * @param {number} width - Width value.
+   * @param {number} height - Height value.
+   *
+   * @throws {Error} If no canvas has been created.
+   *
+   * @returns {Graphics} The resulting value.
+   */
+  resizeCanvas(width, height) {
+    if (!this._canvas) throw new Error('resizeCanvas(): no canvas exists yet — call createCanvas() first.');
+    this._canvas.resize(width, height);
+    if (this._depthBuffer) this._depthBuffer = new Float32Array(width * height).fill(1);
+    return this._canvas;
+  }
+
+  /**
+   * Creates an independent off-screen graphics surface.
+   *
+   * @param {number} [width=100] - Width value.
+   * @param {number} [height=100] - Height value.
+   * @param {string} [renderer=constants.P2D] - Renderer value.
+   *
+   * @returns {Graphics} The resulting value.
+   */
+  createGraphics(width = 100, height = 100, renderer = constants.P2D) {
+    return new Graphics(width, height, renderer);
+  }
+
+  /**
+   * Creates a frame buffer attached to the current rendering target.
+   *
+   * @param {Object} [options={}] - Options value.
+   *
+   * @throws {Error} If no active canvas exists.
+   *
+   * @returns {FrameBuffer} The resulting value.
+   */
+  createFrameBuffer(options = {}) {
+    if (!this._canvas) throw new Error('createFrameBuffer(): no canvas exists yet — call createCanvas() first.');
+    return new FrameBuffer(this._canvas, options);
+  }
+
+  /**
+   * Returns the active canvas pixel buffer.
+   *
+   * @returns {Buffer|null} The resulting value.
+   */
+  get drawingContext() {
+    return this._canvas ? this._canvas.pixelsRef() : null;
+  }
+
+  /**
+   * Updates one or more renderer creation attributes.
+   *
+   * @param {string} key - Key value.
+   * @param {*} value - Value value.
+   *
+   * @returns {Rendering} This instance for chaining.
+   */
+  setAttributes(key, value) {
+    if (typeof key === 'object' && key !== null) {
+      Object.assign(this._attributes, key);
     } else {
-        if (!root || !root.Canvas) throw new Error('Rendering requires canvas.js to be loaded first.');
-        Rendering = factory(root.Canvas);
-        root.Rendering = Rendering;
-        root.Graphics = Rendering.Graphics;
-        root.Framebuffer = Rendering.Framebuffer;
+      this._attributes[key] = value;
     }
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (Canvas) {
-
-/**
- * An off-screen drawing surface with its own {@link Canvas}, independent
- * of (and not attached to the page by) the main sketch canvas. Created via
- * {@link Rendering.createGraphics}. Anything that can draw onto a Canvas
- * (Shapes, Text, etc.) can be pointed at `graphics.canvas` the same way it
- * would at the main canvas.
- *
- * @class
- */
-class Graphics {
-    /**
-     * @param {number} [width=800]
-     * @param {number} [height=600]
-     * @param {string} [ctx='2d'] - `'2d'`, `'webgl'`, or `'webgl2'`.
-     */
-    constructor(width = 800, height = 600, ctx = '2d') {
-        this.canvas = new Canvas({ id: `forge-graphics-${Graphics._id++}`, width, height, ctx });
-        this.canvas.create();
-        // Off-screen buffers aren't part of the page's layout/paint - keep
-        // them out of the flow so they don't visually appear next to the
-        // main sketch canvas.
-        const el = this.canvas.canvas();
-        if (el && el.style) el.style.display = 'none';
-    }
-
-    /** @returns {number} Buffer width, in pixels. */
-    get width() {
-        return this.canvas.width();
-    }
-
-    /** @returns {number} Buffer height, in pixels. */
-    get height() {
-        return this.canvas.height();
-    }
-
-    /**
-     * Reads a pixel or a rectangular region back from the buffer (2D contexts only).
-     * @param {number} [x] @param {number} [y] @param {number} [w] @param {number} [h]
-     * @returns {ImageData|Uint8ClampedArray} Region pixel data (`x`/`y` given) or the whole canvas's `ImageData`.
-     */
-    get(x, y, w, h) {
-        const ctx = this.canvas.context();
-        if (!ctx || typeof ctx.getImageData !== 'function') throw new Error('Graphics#get() requires a 2D context.');
-        if (x === undefined) return ctx.getImageData(0, 0, this.width, this.height);
-        return ctx.getImageData(x, y, w || 1, h || 1).data;
-    }
-
-    /**
-     * Resets the buffer's transformations and drawing state back to defaults, without clearing its pixels.
-     * @returns {Graphics} This instance, to allow chaining.
-     */
-    reset() {
-        const ctx = this.canvas.context();
-        if (ctx && typeof ctx.resetTransform === 'function') ctx.resetTransform();
-        return this;
-    }
-
-    /**
-     * Removes this buffer's underlying `<canvas>` element and stops any loop it had running.
-     * @returns {void}
-     */
-    remove() {
-        this.canvas.noLoop();
-        const el = this.canvas.canvas();
-        if (el && el.parentNode) el.parentNode.removeChild(el);
-    }
-}
-Graphics._id = 0;
-
-/**
- * A WebGL render target: a texture (plus, optionally, a depth buffer) a
- * scene can be drawn into instead of directly onto the screen, then read
- * back or sampled from like any other texture. Created via {@link
- * Rendering.createFramebuffer}, against an existing WebGL {@link Canvas}.
- *
- * @class
- */
-class Framebuffer {
-    /**
-     * @param {Canvas} canvas - A {@link Canvas} already created with a `'webgl'`/`'webgl2'` context; this Framebuffer renders using that context.
-     * @param {Object} [options={}]
-     * @param {number} [options.width] - Defaults to the canvas's own width.
-     * @param {number} [options.height] - Defaults to the canvas's own height.
-     * @param {boolean} [options.depth=true] - Whether to attach a depth renderbuffer.
-     */
-    constructor(canvas, options = {}) {
-        if (canvas.contextType() === canvas.TWO_D) throw new Error('Framebuffer requires a WebGL canvas.');
-        this.canvas = canvas;
-        this._autoSized = options.width === undefined && options.height === undefined;
-        this._width = options.width || canvas.width();
-        this._height = options.height || canvas.height();
-        this._hasDepth = options.depth !== false;
-        this._build();
-    }
-
-    _build() {
-        const gl = this.canvas.context();
-        this._fbo = gl.createFramebuffer();
-        gl.bindFramebuffer(gl.FRAMEBUFFER, this._fbo);
-
-        this._texture = gl.createTexture();
-        gl.bindTexture(gl.TEXTURE_2D, this._texture);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this._width, this._height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this._texture, 0);
-
-        if (this._hasDepth) {
-            this._depthBuffer = gl.createRenderbuffer();
-            gl.bindRenderbuffer(gl.RENDERBUFFER, this._depthBuffer);
-            gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, this._width, this._height);
-            gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, this._depthBuffer);
-        }
-
-        const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-        if (status !== gl.FRAMEBUFFER_COMPLETE) throw new Error(`Framebuffer incomplete (status ${status}).`);
-    }
-
-    /** @returns {number} Current width, in pixels. */
-    get width() { return this._width; }
-    /** @returns {number} Current height, in pixels. */
-    get height() { return this._height; }
-    /** @returns {WebGLTexture} The framebuffer's color texture, for use with `texture()`-style binding. */
-    get colorTexture() { return this._texture; }
-
-    /**
-     * Toggles autosizing (tracking the parent canvas's size) or returns the current mode.
-     * @param {boolean} [value]
-     * @returns {boolean} Whether autosizing is enabled after this call.
-     */
-    autoSized(value) {
-        if (value !== undefined) this._autoSized = value;
-        return this._autoSized;
-    }
-
-    /**
-     * Begins drawing shapes to this framebuffer: binds it as the active render target.
-     * @returns {Framebuffer} This instance, to allow chaining.
-     */
-    begin() {
-        const gl = this.canvas.context();
-        if (this._autoSized && (this._width !== this.canvas.width() || this._height !== this.canvas.height())) {
-            this.resize(this.canvas.width(), this.canvas.height());
-        }
-        this._priorViewport = gl.getParameter(gl.VIEWPORT);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, this._fbo);
-        gl.viewport(0, 0, this._width, this._height);
-        return this;
-    }
-
-    /**
-     * Stops drawing to this framebuffer, restoring the canvas's default render target.
-     * @returns {Framebuffer} This instance, to allow chaining.
-     */
-    end() {
-        const gl = this.canvas.context();
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-        if (this._priorViewport) gl.viewport(...this._priorViewport);
-        return this;
-    }
-
-    /**
-     * Runs `drawFn` with this framebuffer bound as the render target, then restores the previous target automatically.
-     * @param {function(): void} drawFn
-     * @returns {Framebuffer} This instance, to allow chaining.
-     */
-    draw(drawFn) {
-        this.begin();
-        try { drawFn(); } finally { this.end(); }
-        return this;
-    }
-
-    /**
-     * Resizes the framebuffer, rebuilding its texture/depth-buffer storage.
-     * @param {number} width @param {number} height
-     * @returns {Framebuffer} This instance, to allow chaining.
-     */
-    resize(width, height) {
-        this._width = width;
-        this._height = height;
-        this.remove();
-        this._build();
-        return this;
-    }
-
-    /**
-     * Reads a pixel or region of pixels back from the framebuffer.
-     * @param {number} [x=0] @param {number} [y=0] @param {number} [w=1] @param {number} [h=1]
-     * @returns {Uint8Array} RGBA bytes for the requested region.
-     */
-    get(x = 0, y = 0, w = 1, h = 1) {
-        const gl = this.canvas.context();
-        const pixels = new Uint8Array(w * h * 4);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, this._fbo);
-        gl.readPixels(x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-        return pixels;
-    }
-
-    /**
-     * Deletes this framebuffer's GPU resources (texture, depth buffer, and the framebuffer object itself).
-     * @returns {void}
-     */
-    remove() {
-        const gl = this.canvas.context();
-        if (this._texture) gl.deleteTexture(this._texture);
-        if (this._depthBuffer) gl.deleteRenderbuffer(this._depthBuffer);
-        if (this._fbo) gl.deleteFramebuffer(this._fbo);
-    }
+    return this;
+  }
 }
 
-/**
- * Top-level entry points for creating and managing render surfaces:
- * the main sketch canvas, off-screen {@link Graphics} buffers, and WebGL
- * {@link Framebuffer} render targets.
- *
- * @namespace
- */
-const Rendering = {
-    Graphics,
-    Framebuffer,
+// ---------------------------------------------------------------------------
+// Graphics: an off-screen (or main) drawing surface — a thin, renderer-aware
+// wrapper around image.js's `Images` (which already owns the real RGBA
+// pixel buffer + get/set/resize/filter/save logic), so 2D pixel data isn't
+// duplicated between this file and image.js.
+// ---------------------------------------------------------------------------
+class Graphics extends Images {
+  /**
+   * Creates a new Graphics instance.
+   *
+   * @param {number} [width=100] - Width value.
+   * @param {number} [height=100] - Height value.
+   * @param {string} [renderer=constants.P2D] - Renderer value.
+   */
+  constructor(width = 100, height = 100, renderer = constants.P2D) {
+    super(width, height);
+    this.renderer = renderer;
+    this._frameBuffers = [];
+  }
 
-    /**
-     * Creates the main `<canvas>` element for a sketch. Thin, explicit
-     * wrapper over `new Canvas(options).create()` (i.e. p5.js's
-     * `createCanvas(w, h, renderer)`, expanded to this engine's option object).
-     *
-     * @param {Object} [options={}] - Forwarded to `new Canvas()` - see {@link Canvas} for the full list.
-     * @returns {Canvas} The created, ready-to-draw-on canvas.
-     */
-    createCanvas(options = {}) {
-        return new Canvas(options).create();
-    },
+  /**
+   * Creates a frame buffer attached to the current rendering target.
+   *
+   * @param {Object} [options={}] - Options value.
+   *
+   * @throws {Error} If no active canvas exists.
+   *
+   * @returns {FrameBuffer} The resulting value.
+   */
+  createFrameBuffer(options = {}) {
+    const fb = new FrameBuffer(this, options);
+    this._frameBuffers.push(fb);
+    return fb;
+  }
 
-    /**
-     * Creates an off-screen graphics buffer with its own canvas and drawing state, independent of the main sketch canvas.
-     * @param {number} [width=800] @param {number} [height=600] @param {string} [ctx='2d']
-     * @returns {Graphics}
-     */
-    createGraphics(width = 800, height = 600, ctx = '2d') {
-        return new Graphics(width, height, ctx);
-    },
+  /**
+   * Releases the object’s buffers and associated resources.
+   *
+   * @returns {void} The resulting value.
+   */
+  remove() {
+    for (const fb of this._frameBuffers) fb.remove();
+    this._frameBuffers = [];
+    this._pixels = Buffer.alloc(0);
+    this._width = 0;
+    this._height = 0;
+    this._loaded = false;
+  }
 
-    /**
-     * Creates a WebGL framebuffer (render-to-texture target) against an existing WebGL canvas.
-     * @param {Canvas} canvas - Must already have been created with a `'webgl'`/`'webgl2'` context.
-     * @param {Object} [options={}] - See the {@link Framebuffer} constructor.
-     * @returns {Framebuffer}
-     */
-    createFramebuffer(canvas, options = {}) {
-        return new Framebuffer(canvas, options);
-    },
+  /**
+   * Restores drawing state without modifying pixel content.
+   *
+   * @returns {Graphics} This instance for chaining.
+   */
+  reset() {
+    this._tintColor = null;
+    return this;
+  }
+}
 
-    /**
-     * Removes the given canvas's `<canvas>` element from the page and stops its loop.
-     * @param {Canvas} canvas
-     * @returns {void}
-     */
-    noCanvas(canvas) {
-        canvas.noLoop();
-        const el = canvas.canvas();
-        if (el && el.parentNode) el.parentNode.removeChild(el);
-    },
+// ---------------------------------------------------------------------------
+// FrameBuffer: a WEBGL-style render target — a canvas (or graphics buffer)
+// can `begin()`/`end()` a FrameBuffer to redirect drawing into its own
+// color (+ depth) buffer instead of straight to the screen, then read it
+// back via `get()`/`pixels`/`loadPixels()`, or hand it to a `Camera` for
+// use as a texture.
+// ---------------------------------------------------------------------------
+class FrameBuffer {
+  /**
+   * Creates a new FrameBuffer instance.
+   *
+   * @param {SoundNode|VirtualAudioNode|Object} target - Target value.
+   * @param {Object} [options={}] - Options value.
+   */
+  constructor(target, options = {}) {
+    this._target = target;
+    this._density = options.density || 1;
+    this._width = options.width || target.width;
+    this._height = options.height || target.height;
+    this._hasDepth = options.depth !== false;
+    this._colorBuffer = new Images(this._width * this._density, this._height * this._density);
+    this._depthBuffer = this._hasDepth
+      ? new Float32Array(this._width * this._density * this._height * this._density).fill(1)
+      : null;
+    this._autoResize = false;
+    this._active = false;
+    this._removed = false;
+  }
 
-    /**
-     * Resizes an existing canvas's backing store and CSS size in place.
-     * @param {Canvas} canvas @param {number} width @param {number} height
-     * @returns {Canvas} The same canvas instance, resized.
-     */
-    resizeCanvas(canvas, width, height) {
-        const el = canvas.canvas();
-        if (!el) throw new Error('Rendering.resizeCanvas() requires a canvas that has already been created().');
-        el.width = width;
-        el.height = height;
-        el.style.width = `${width}px`;
-        el.style.height = `${height}px`;
-        const ctx = canvas.context();
-        if (canvas.contextType() !== canvas.TWO_D) ctx.viewport(0, 0, width, height);
-        return canvas;
-    },
+  /**
+   * Gets or sets automatic frame-buffer resizing.
+   *
+   * @param {*} value - Value value.
+   *
+   * @returns {FrameBuffer} This instance for chaining.
+   */
+  autoResize(value) {
+    if (value === undefined) return this._autoResize;
+    this._autoResize = Boolean(value);
+    return this;
+  }
 
-    /**
-     * Sets a WebGL context attribute (`alpha`, `antialias`, `depth`, `premultipliedAlpha`, `preserveDrawingBuffer`, `stencil`, ...) for record-keeping/inspection. Real context attributes must be requested at creation time (`canvas.getContext(type, attributes)`); this stores the intent alongside the canvas for the engine's own reference, since Canvas#create() doesn't currently accept a custom attributes bag.
-     * @param {Canvas} canvas
-     * @param {string} key
-     * @param {*} value
-     * @returns {Canvas} The same canvas instance.
-     */
-    setAttributes(canvas, key, value) {
-        canvas._forgeAttributes = canvas._forgeAttributes || {};
-        canvas._forgeAttributes[key] = value;
-        return canvas;
-    },
+  /**
+   * Activates this frame buffer as the drawing target.
+   *
+   * @throws {Error} If the frame buffer has been removed.
+   *
+   * @returns {FrameBuffer} This instance for chaining.
+   */
+  begin() {
+    if (this._removed) throw new Error('FrameBuffer.begin(): this frame buffer was removed.');
+    this._active = true;
+    return this;
+  }
 
-    /**
-     * Clears the depth buffer of a WebGL canvas (2D canvases have no depth buffer and are a no-op).
-     * @param {Canvas} canvas
-     * @returns {void}
-     */
-    clearDepth(canvas) {
-        if (canvas.contextType() === canvas.TWO_D) return;
-        const gl = canvas.context();
-        gl.clear(gl.DEPTH_BUFFER_BIT);
-    },
+  /**
+   * Deactivates this frame buffer as the drawing target.
+   *
+   * @returns {FrameBuffer} This instance for chaining.
+   */
+  end() {
+    this._active = false;
+    return this;
+  }
 
-    /**
-     * Returns the raw rendering context for direct/advanced access, mirroring p5.js's `drawingContext`.
-     * @param {Canvas} canvas
-     * @returns {RenderingContext}
-     */
-    drawingContext(canvas) {
-        return canvas.context();
-    }
-};
+  /**
+   * Returns the frame buffer color attachment.
+   *
+   * @returns {Images} The resulting value.
+   */
+  get color() { return this._colorBuffer; }
 
-return Rendering;
-});
+  /**
+   * Returns the frame buffer depth attachment.
+   *
+   * @returns {Float32Array|null} The resulting value.
+   */
+  get depth() { return this._depthBuffer; }
+
+  /**
+   * Creates a camera configured for this frame buffer’s aspect ratio.
+   *
+   * @returns {Camera} The resulting value.
+   */
+  createCamera() {
+    const cam = new Camera();
+    cam.perspective(Math.PI / 3, this._width / Math.max(1, this._height));
+    return cam;
+  }
+
+  /**
+   * Executes drawing commands while this frame buffer is active.
+   *
+   * @param {Function} callback - Callback value.
+   *
+   * @returns {FrameBuffer} This instance for chaining.
+   */
+  draw(callback) {
+    this.begin();
+    if (typeof callback === 'function') callback(this);
+    this.end();
+    return this;
+  }
+
+  /**
+   * Performs the get operation.
+   *
+   * @param {number} x - X value.
+   * @param {number} y - Y value.
+   * @param {number} w - W value.
+   * @param {number} h - H value.
+   *
+   * @returns {Images|number[]} The resulting value.
+   */
+  get(x, y, w, h) { return this._colorBuffer.get(x, y, w, h); }
+
+  /**
+   * Returns the height in pixels.
+   *
+   * @returns {number} The resulting value.
+   */
+  get height() { return this._height; }
+
+  /**
+   * Returns the live color-buffer pixels.
+   *
+   * @returns {Buffer} The resulting value.
+   */
+  loadPixels() { return this._colorBuffer.loadPixels(); }
+
+  /**
+   * Gets or sets the frame-buffer pixel density.
+   *
+   * @param {*} value - Value value.
+   *
+   * @returns {FrameBuffer} This instance for chaining.
+   */
+  pixelDensity(value) {
+    if (value === undefined) return this._density;
+    this._density = value;
+    this._colorBuffer.resize(this._width * this._density, this._height * this._density);
+    if (this._hasDepth) this._depthBuffer = new Float32Array(this._width * this._density * this._height * this._density).fill(1);
+    return this;
+  }
+
+  /**
+   * Returns the raw RGBA color-buffer pixels.
+   *
+   * @returns {Buffer} The resulting value.
+   */
+  get pixels() { return this._colorBuffer.pixelsRef(); }
+
+  /**
+   * Releases the object’s buffers and associated resources.
+   *
+   * @returns {void} The resulting value.
+   */
+  remove() {
+    this._removed = true;
+    this._active = false;
+    this._colorBuffer.remove ? this._colorBuffer.remove() : null;
+    this._depthBuffer = null;
+  }
+
+  /**
+   * Resizes the color and depth attachments.
+   *
+   * @param {number} width - Width value.
+   * @param {number} height - Height value.
+   *
+   * @returns {FrameBuffer} This instance for chaining.
+   */
+  resize(width, height) {
+    this._width = width;
+    this._height = height;
+    this._colorBuffer.resize(width * this._density, height * this._density);
+    if (this._hasDepth) this._depthBuffer = new Float32Array(width * this._density * height * this._density).fill(1);
+    return this;
+  }
+
+  /**
+   * Returns the width in pixels.
+   *
+   * @returns {number} The resulting value.
+   */
+  get width() { return this._width; }
+}
+
+module.exports = { Rendering, FrameBuffer, Graphics };
