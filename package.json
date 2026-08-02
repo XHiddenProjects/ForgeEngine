@@ -15,7 +15,8 @@
   ],
   "scripts": {
     "start": "node core/index.js",
-    "dev": "node core/index.js"
+    "dev": "node core/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
     "@ForgeEngine/utils": "^1.0.0",
