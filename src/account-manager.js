@@ -1,9 +1,11 @@
 "use strict";
 
 const path = require("node:path");
+const fs = require("node:fs");
 const crypto = require("node:crypto");
-const { Storage } = require("@ForgeEngine/utils");
+const { IO } = require("@ForgeEngine/utils");
 
+const io = new IO();
 const ACCOUNT_PATH = root => path.join(root, ".forge", "account.json");
 
 const SCRYPT_KEYLEN = 64;
@@ -87,7 +89,19 @@ const sessionCookieOptions = () => ({
 
 /** Reads the on-disk account record, or null if no account has been created yet. */
 async function readAccount(root) {
-  return Storage.readJSON(ACCOUNT_PATH(root), null);
+  try {
+    return await io.loadJSON(ACCOUNT_PATH(root));
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+/** Persists the account record, creating the `.forge` directory if needed. */
+async function writeAccount(root, account) {
+  const filePath = ACCOUNT_PATH(root);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  io.saveJSON(account, filePath);
 }
 
 /** Public-safe view of an account record (never includes password hash/session hash). */
@@ -129,7 +143,7 @@ async function registerAccount(root, { displayName, password }) {
     sessionHash: hashToken(token)
   };
 
-  await Storage.writeJSON(ACCOUNT_PATH(root), account);
+  await writeAccount(root, account);
   return { account: publicAccount(account), sessionToken: token };
 }
 
@@ -144,7 +158,7 @@ async function loginAccount(root, { password }) {
   const token = newSessionToken();
   account.sessionHash = hashToken(token);
   account.updatedAt = new Date().toISOString();
-  await Storage.writeJSON(ACCOUNT_PATH(root), account);
+  await writeAccount(root, account);
   return { account: publicAccount(account), sessionToken: token };
 }
 
@@ -154,7 +168,7 @@ async function logoutAccount(root) {
   if (!account) return;
   account.sessionHash = crypto.randomBytes(32).toString("hex"); // unguessable, matches nothing
   account.updatedAt = new Date().toISOString();
-  await Storage.writeJSON(ACCOUNT_PATH(root), account);
+  await writeAccount(root, account);
 }
 
 /** Settings-tab flow: verifies the current password, then sets a new one and re-issues the session. */
@@ -170,7 +184,7 @@ async function changePassword(root, { currentPassword, newPassword }) {
   account.password = hashPassword(pass);
   account.sessionHash = hashToken(token);
   account.updatedAt = new Date().toISOString();
-  await Storage.writeJSON(ACCOUNT_PATH(root), account);
+  await writeAccount(root, account);
   return { account: publicAccount(account), sessionToken: token };
 }
 

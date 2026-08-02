@@ -1,15 +1,9 @@
 {
   "name": "ForgeEngine",
   "version": "1.0.0",
-  "private": false,
-  "description": "Local ForgeEngine game dashboard and editor",
-  "main": "core/index.js",
-  "type": "commonjs",
-  "scripts": {
-    "start": "node core/index.js",
-    "dev": "node --watch core/index.js",
-    "test": "echo \"No tests specified\""
-  },
+  "private": true,
+  "description": "ForgeEngine — browser-based 2D/3D game engine and editor",
+  "license": "MIT",
   "engines": {
     "node": ">=18"
   },
@@ -19,7 +13,12 @@
     "2d",
     "3d"
   ],
+  "scripts": {
+    "start": "node core/index.js",
+    "dev": "node core/index.js"
+  },
   "dependencies": {
+    "@ForgeEngine/utils": "^1.0.0",
     "express": "^5.1.0",
     "opentype.js": "^2.0.0"
   }

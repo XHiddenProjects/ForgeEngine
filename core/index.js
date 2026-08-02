@@ -4,7 +4,11 @@ const path = require("node:path");
 const fs = require("node:fs/promises");
 const https = require("node:https");
 const express = require("express");
-const { createGame, listGames, readGame, listAssets, saveScene } = require("../src/game-manager");
+const {
+  createGame, listGames, readGame, deleteGame,
+  listScenes, readScene, createScene, deleteScene, saveScene,
+  listAssets, listAssetsDetailed, uploadAsset, deleteAsset, updateAsset, findAsset
+} = require("../src/game-manager");
 const {
   SESSION_COOKIE,
   sessionCookieOptions,
@@ -26,7 +30,7 @@ const PORT = Number(process.env.PORT) || 4173;
 const HOST = process.env.HOST || "127.0.0.1";
 
 app.disable("x-powered-by");
-app.use(express.json({ limit: "64kb" }));
+app.use(express.json({ limit: "20mb" }));
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "same-origin");
@@ -70,6 +74,8 @@ app.post("/api/account/logout", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+
+
 // Everything else under /api requires an authenticated session.
 app.use("/api", (req, res, next) => authenticateLocalRequest(ROOT, req, res, next));
 
@@ -97,13 +103,75 @@ app.get("/api/games/:slug", async (req, res, next) => {
   catch (error) { next(error); }
 });
 
+app.delete("/api/games/:slug", async (req, res, next) => {
+  try { res.json(await deleteGame(ROOT, req.params.slug)); }
+  catch (error) { next(error); }
+});
+
 app.get("/api/assets", async (_req, res, next) => {
   try { res.json({ games: await listAssets(ROOT) }); } catch (error) { next(error); }
 });
 
-app.put("/api/games/:slug/scene", async (req, res, next) => {
-  try { res.json({ scene: await saveScene(ROOT, req.params.slug, req.body || {}) }); }
+// Scenes (levels): a game can hold several, each edited/saved independently.
+app.get("/api/games/:slug/scenes", async (req, res, next) => {
+  try { res.json({ scenes: await listScenes(ROOT, req.params.slug) }); }
   catch (error) { next(error); }
+});
+
+app.post("/api/games/:slug/scenes", async (req, res, next) => {
+  try { res.status(201).json({ scene: await createScene(ROOT, req.params.slug, req.body || {}) }); }
+  catch (error) { next(error); }
+});
+
+app.get("/api/games/:slug/scenes/:sceneId", async (req, res, next) => {
+  try { res.json({ scene: await readScene(ROOT, req.params.slug, req.params.sceneId) }); }
+  catch (error) { next(error); }
+});
+
+app.put("/api/games/:slug/scenes/:sceneId", async (req, res, next) => {
+  try { res.json({ scene: await saveScene(ROOT, req.params.slug, req.params.sceneId, req.body || {}) }); }
+  catch (error) { next(error); }
+});
+
+app.delete("/api/games/:slug/scenes/:sceneId", async (req, res, next) => {
+  try { res.json(await deleteScene(ROOT, req.params.slug, req.params.sceneId)); }
+  catch (error) { next(error); }
+});
+
+// Backward-compatible single-scene route, defaults to the "main" scene.
+app.put("/api/games/:slug/scene", async (req, res, next) => {
+  try { res.json({ scene: await saveScene(ROOT, req.params.slug, "main", req.body || {}) }); }
+  catch (error) { next(error); }
+});
+
+// Assets: organized per-game under assets/<category>/, each with a JSON
+// metadata sidecar (name, tags, size, timestamps, and script source for code assets).
+app.get("/api/games/:slug/assets", async (req, res, next) => {
+  try { res.json({ assets: await listAssetsDetailed(ROOT, req.params.slug) }); }
+  catch (error) { next(error); }
+});
+
+app.post("/api/games/:slug/assets", async (req, res, next) => {
+  try { res.status(201).json({ asset: await uploadAsset(ROOT, req.params.slug, req.body || {}) }); }
+  catch (error) { next(error); }
+});
+
+app.patch("/api/games/:slug/assets/:assetId", async (req, res, next) => {
+  try { res.json({ asset: await updateAsset(ROOT, req.params.slug, req.params.assetId, req.body || {}) }); }
+  catch (error) { next(error); }
+});
+
+app.delete("/api/games/:slug/assets/:assetId", async (req, res, next) => {
+  try { res.json(await deleteAsset(ROOT, req.params.slug, req.params.assetId)); }
+  catch (error) { next(error); }
+});
+
+app.get("/api/games/:slug/assets/:assetId/file", async (req, res, next) => {
+  try {
+    const { meta, filePath } = await findAsset(ROOT, req.params.slug, req.params.assetId);
+    res.setHeader("Content-Type", meta.mime || "application/octet-stream");
+    res.sendFile(filePath);
+  } catch (error) { next(error); }
 });
 
 app.use("/assets", express.static(path.join(ROOT, "assets"), { fallthrough: false }));

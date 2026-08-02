@@ -152,6 +152,8 @@ a { color: inherit; }
 .forge-button--primary { background: var(--primary); color: white; box-shadow: 0 8px 22px rgba(109, 93, 252, 0.22); }
 .forge-button--primary:hover { background: var(--primary-hover); }
 .forge-button--secondary { border-color: var(--border); background: var(--surface-2); color: var(--text); }
+.forge-button--danger { border: 1px solid rgba(255, 113, 139, 0.35); background: rgba(255, 113, 139, 0.1); color: var(--danger); }
+.forge-button--danger:hover { background: rgba(255, 113, 139, 0.2); border-color: var(--danger); }
 .forge-icon-button { width: 40px; height: 40px; border-color: var(--border); border-radius: 9px; background: var(--surface); font-size: 17px; }
 
 /* Content */
@@ -192,7 +194,8 @@ select { height: 39px; padding: 0 34px 0 11px; }
 .forge-project:hover { transform: translateY(-2px); border-color: #445477; background: var(--surface-2); }
 .forge-project h3 { margin: 0; font-size: 18px; }
 .forge-project p { margin: 8px 0 24px; color: var(--muted); font-size: 13px; line-height: 1.5; }
-.forge-project .forge-button { justify-self: start; margin-top: auto; }
+.forge-project .forge-button { justify-self: start; }
+.forge-project__actions { display: flex; gap: 8px; margin-top: auto; }
 
 .forge-empty { display: grid; min-height: 260px; place-items: center; align-content: center; border: 1px dashed var(--border-strong); border-radius: 16px; background: rgba(13, 20, 36, 0.55); padding: 36px; text-align: center; }
 .forge-empty__icon { display: grid; width: 46px; height: 46px; place-items: center; border-radius: 13px; background: var(--primary-soft); color: #afa7ff; font-size: 22px; }

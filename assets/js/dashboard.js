@@ -157,8 +157,16 @@
       card.className = "forge-project";
       const title = document.createElement("h3"); title.textContent = game.name;
       const meta = document.createElement("p"); meta.textContent = `${game.template} · ${new Date(game.updatedAt).toLocaleString()}`;
+      const actions = document.createElement("div");
+      actions.className = "forge-project__actions";
       const open = document.createElement("a"); open.className = "forge-button forge-button--primary"; open.textContent = "Open editor"; open.href = `/editor/${encodeURIComponent(game.slug)}`;
-      card.append(title, meta, open); return card;
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "forge-button forge-button--danger";
+      del.textContent = "Delete";
+      del.addEventListener("click", () => confirmDeleteGame(game));
+      actions.append(open, del);
+      card.append(title, meta, actions); return card;
     }));
     empty.hidden = visible.length !== 0;
     $("#projectCount").textContent = games.length;
@@ -178,6 +186,17 @@
     const bar = $(".forge-progress span");
     if (label) label.textContent = `${percent}%`;
     if (bar) bar.style.width = `${percent}%`;
+  }
+
+  async function confirmDeleteGame(game) {
+    const ok = window.confirm(`Delete "${game.name}"? This removes its scenes, scripts, and assets permanently. This can't be undone.`);
+    if (!ok) return;
+    try {
+      await api(`/api/games/${encodeURIComponent(game.slug)}`, { method: "DELETE" });
+      await Promise.all([loadGames(), loadAssets()]);
+    } catch (error) {
+      window.alert(error.message || "Couldn't delete this game.");
+    }
   }
 
   function openCreate(template = "Blank Canvas") { $("#gameTemplate").value = template; $("#formError").textContent = ""; dialog.showModal(); $("#gameName").focus(); }
