@@ -2,3 +2,5 @@ node_modules/
 .forge/
 games/*
 !games/.gitkeep
+dist/
+release/
