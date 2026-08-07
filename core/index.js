@@ -2,6 +2,7 @@
 
 const path = require("node:path");
 const fs = require("node:fs/promises");
+const http = require("node:http");
 const https = require("node:https");
 const express = require("express");
 const {
@@ -21,20 +22,27 @@ const {
 } = require("../src/account-manager");
 
 const app = express();
-const ROOT = path.resolve(__dirname, "..");
-const CERTS_DIR = path.join(ROOT, "certs");
+// APP_ROOT contains ForgeEngine's shipped application files. DATA_ROOT contains
+// user-created data. Keeping these separate is important for desktop installs,
+// because Program Files is not a safe place to write projects or account data.
+const APP_ROOT = path.resolve(__dirname, "..");
+const DATA_ROOT = process.env.FORGE_DATA_ROOT
+  ? path.resolve(process.env.FORGE_DATA_ROOT)
+  : APP_ROOT;
+const CERTS_DIR = path.join(APP_ROOT, "certs");
 const TLS_KEY_FILE = process.env.TLS_KEY_FILE || "localhost-key.pem";
 const TLS_CERT_FILE = process.env.TLS_CERT_FILE || "localhost.pem";
 const TLS_CA_FILE = process.env.TLS_CA_FILE || "";
 const PORT = Number(process.env.PORT) || 4173;
 const HOST = process.env.HOST || "127.0.0.1";
+const USE_LOCAL_HTTP = process.env.FORGE_LOCAL_HTTP === "1";
 
 app.disable("x-powered-by");
 app.use(express.json({ limit: "20mb" }));
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "same-origin");
-  res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  if (!USE_LOCAL_HTTP) res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
   res.setHeader("Content-Security-Policy", "default-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; script-src 'self'; script-src-attr 'none'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
   next();
 });
@@ -44,14 +52,14 @@ app.use((req, res, next) => {
 // uses this on every load to decide: create-account screen, login screen,
 // or the dashboard itself.
 app.get("/api/account/status", async (req, res, next) => {
-  try { res.json(await accountStatus(ROOT, req)); }
+  try { res.json(await accountStatus(DATA_ROOT, req)); }
   catch (error) { next(error); }
 });
 
 // First-run only: creates the single local account for this device.
 app.post("/api/account/register", async (req, res, next) => {
   try {
-    const { account, sessionToken } = await registerAccount(ROOT, req.body || {});
+    const { account, sessionToken } = await registerAccount(DATA_ROOT, req.body || {});
     res.cookie(SESSION_COOKIE, sessionToken, sessionCookieOptions());
     res.status(201).json({ account });
   } catch (error) { next(error); }
@@ -60,7 +68,7 @@ app.post("/api/account/register", async (req, res, next) => {
 // Returning users: verifies the password against the on-device account.
 app.post("/api/account/login", async (req, res, next) => {
   try {
-    const { account, sessionToken } = await loginAccount(ROOT, req.body || {});
+    const { account, sessionToken } = await loginAccount(DATA_ROOT, req.body || {});
     res.cookie(SESSION_COOKIE, sessionToken, sessionCookieOptions());
     res.status(200).json({ account });
   } catch (error) { next(error); }
@@ -68,7 +76,7 @@ app.post("/api/account/login", async (req, res, next) => {
 
 app.post("/api/account/logout", async (req, res, next) => {
   try {
-    await logoutAccount(ROOT);
+    await logoutAccount(DATA_ROOT);
     res.clearCookie(SESSION_COOKIE, sessionCookieOptions());
     res.status(200).json({ ok: true });
   } catch (error) { next(error); }
@@ -77,109 +85,109 @@ app.post("/api/account/logout", async (req, res, next) => {
 
 
 // Everything else under /api requires an authenticated session.
-app.use("/api", (req, res, next) => authenticateLocalRequest(ROOT, req, res, next));
+app.use("/api", (req, res, next) => authenticateLocalRequest(DATA_ROOT, req, res, next));
 
 app.post("/api/account/change-password", async (req, res, next) => {
   try {
-    const { account, sessionToken } = await changePassword(ROOT, req.body || {});
+    const { account, sessionToken } = await changePassword(DATA_ROOT, req.body || {});
     res.cookie(SESSION_COOKIE, sessionToken, sessionCookieOptions());
     res.status(200).json({ account });
   } catch (error) { next(error); }
 });
 
 app.get("/api/games", async (_req, res, next) => {
-  try { res.json({ games: await listGames(ROOT) }); } catch (error) { next(error); }
+  try { res.json({ games: await listGames(DATA_ROOT) }); } catch (error) { next(error); }
 });
 
 app.post("/api/games", async (req, res, next) => {
   try {
-    const game = await createGame(ROOT, req.body || {});
+    const game = await createGame(DATA_ROOT, req.body || {});
     res.status(201).json({ game, editorUrl: `/editor/${encodeURIComponent(game.slug)}` });
   } catch (error) { next(error); }
 });
 
 app.get("/api/games/:slug", async (req, res, next) => {
-  try { res.json({ game: await readGame(ROOT, req.params.slug) }); }
+  try { res.json({ game: await readGame(DATA_ROOT, req.params.slug) }); }
   catch (error) { next(error); }
 });
 
 app.delete("/api/games/:slug", async (req, res, next) => {
-  try { res.json(await deleteGame(ROOT, req.params.slug)); }
+  try { res.json(await deleteGame(DATA_ROOT, req.params.slug)); }
   catch (error) { next(error); }
 });
 
 app.get("/api/assets", async (_req, res, next) => {
-  try { res.json({ games: await listAssets(ROOT) }); } catch (error) { next(error); }
+  try { res.json({ games: await listAssets(DATA_ROOT) }); } catch (error) { next(error); }
 });
 
 // Scenes (levels): a game can hold several, each edited/saved independently.
 app.get("/api/games/:slug/scenes", async (req, res, next) => {
-  try { res.json({ scenes: await listScenes(ROOT, req.params.slug) }); }
+  try { res.json({ scenes: await listScenes(DATA_ROOT, req.params.slug) }); }
   catch (error) { next(error); }
 });
 
 app.post("/api/games/:slug/scenes", async (req, res, next) => {
-  try { res.status(201).json({ scene: await createScene(ROOT, req.params.slug, req.body || {}) }); }
+  try { res.status(201).json({ scene: await createScene(DATA_ROOT, req.params.slug, req.body || {}) }); }
   catch (error) { next(error); }
 });
 
 app.get("/api/games/:slug/scenes/:sceneId", async (req, res, next) => {
-  try { res.json({ scene: await readScene(ROOT, req.params.slug, req.params.sceneId) }); }
+  try { res.json({ scene: await readScene(DATA_ROOT, req.params.slug, req.params.sceneId) }); }
   catch (error) { next(error); }
 });
 
 app.put("/api/games/:slug/scenes/:sceneId", async (req, res, next) => {
-  try { res.json({ scene: await saveScene(ROOT, req.params.slug, req.params.sceneId, req.body || {}) }); }
+  try { res.json({ scene: await saveScene(DATA_ROOT, req.params.slug, req.params.sceneId, req.body || {}) }); }
   catch (error) { next(error); }
 });
 
 app.delete("/api/games/:slug/scenes/:sceneId", async (req, res, next) => {
-  try { res.json(await deleteScene(ROOT, req.params.slug, req.params.sceneId)); }
+  try { res.json(await deleteScene(DATA_ROOT, req.params.slug, req.params.sceneId)); }
   catch (error) { next(error); }
 });
 
 // Backward-compatible single-scene route, defaults to the "main" scene.
 app.put("/api/games/:slug/scene", async (req, res, next) => {
-  try { res.json({ scene: await saveScene(ROOT, req.params.slug, "main", req.body || {}) }); }
+  try { res.json({ scene: await saveScene(DATA_ROOT, req.params.slug, "main", req.body || {}) }); }
   catch (error) { next(error); }
 });
 
 // Assets: organized per-game under assets/<category>/, each with a JSON
 // metadata sidecar (name, tags, size, timestamps, and script source for code assets).
 app.get("/api/games/:slug/assets", async (req, res, next) => {
-  try { res.json({ assets: await listAssetsDetailed(ROOT, req.params.slug) }); }
+  try { res.json({ assets: await listAssetsDetailed(DATA_ROOT, req.params.slug) }); }
   catch (error) { next(error); }
 });
 
 app.post("/api/games/:slug/assets", async (req, res, next) => {
-  try { res.status(201).json({ asset: await uploadAsset(ROOT, req.params.slug, req.body || {}) }); }
+  try { res.status(201).json({ asset: await uploadAsset(DATA_ROOT, req.params.slug, req.body || {}) }); }
   catch (error) { next(error); }
 });
 
 app.patch("/api/games/:slug/assets/:assetId", async (req, res, next) => {
-  try { res.json({ asset: await updateAsset(ROOT, req.params.slug, req.params.assetId, req.body || {}) }); }
+  try { res.json({ asset: await updateAsset(DATA_ROOT, req.params.slug, req.params.assetId, req.body || {}) }); }
   catch (error) { next(error); }
 });
 
 app.delete("/api/games/:slug/assets/:assetId", async (req, res, next) => {
-  try { res.json(await deleteAsset(ROOT, req.params.slug, req.params.assetId)); }
+  try { res.json(await deleteAsset(DATA_ROOT, req.params.slug, req.params.assetId)); }
   catch (error) { next(error); }
 });
 
 app.get("/api/games/:slug/assets/:assetId/file", async (req, res, next) => {
   try {
-    const { meta, filePath } = await findAsset(ROOT, req.params.slug, req.params.assetId);
+    const { meta, filePath } = await findAsset(DATA_ROOT, req.params.slug, req.params.assetId);
     res.setHeader("Content-Type", meta.mime || "application/octet-stream");
     res.sendFile(filePath);
   } catch (error) { next(error); }
 });
 
-app.use("/assets", express.static(path.join(ROOT, "assets"), { fallthrough: false }));
-app.use("/utils", express.static(path.join(ROOT, "utils", "src"), { fallthrough: false }));
+app.use("/assets", express.static(path.join(APP_ROOT, "assets"), { fallthrough: false }));
+app.use("/utils", express.static(path.join(APP_ROOT, "utils", "src"), { fallthrough: false }));
 app.get(["/editor", "/editor/:slug"], (_req, res) => {
-  res.sendFile(path.join(ROOT, "public", "editor.html"));
+  res.sendFile(path.join(APP_ROOT, "public", "editor.html"));
 });
-app.use(express.static(path.join(ROOT, "public")));
+app.use(express.static(path.join(APP_ROOT, "public")));
 
 app.use((error, _req, res, _next) => {
   const status = error.status || 500;
@@ -197,21 +205,49 @@ async function loadTlsOptions() {
   return options;
 }
 
+/**
+ * Starts ForgeEngine's local web/API server.
+ *
+ * Browser development keeps the existing HTTPS behavior. The Electron desktop
+ * shell sets FORGE_LOCAL_HTTP=1 and binds to 127.0.0.1 only; this avoids
+ * shipping/trusting a self-signed certificate inside the desktop application.
+ * PORT=0 is supported so the OS can choose a free ephemeral port.
+ *
+ * Returning the server + URL makes lifecycle management explicit for Electron
+ * and keeps this function reusable for tests or future launchers.
+ */
 async function startServer() {
-  try {
-    await fs.mkdir(path.join(ROOT, "games"), { recursive: true });
-    const tlsOptions = await loadTlsOptions();
-    https.createServer(tlsOptions, app).listen(PORT, HOST, () => {
-      console.log(`ForgeEngine: https://${HOST}:${PORT}`);
+  await fs.mkdir(path.join(DATA_ROOT, "games"), { recursive: true });
+
+  const server = USE_LOCAL_HTTP
+    ? http.createServer(app)
+    : https.createServer(await loadTlsOptions(), app);
+
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(PORT, HOST, () => {
+      const address = server.address();
+      const actualPort = typeof address === "object" && address ? address.port : PORT;
+      const protocol = USE_LOCAL_HTTP ? "http" : "https";
+      const url = `${protocol}://${HOST}:${actualPort}`;
+      console.log(`ForgeEngine: ${url}`);
+      resolve({ server, url });
     });
-  } catch (error) {
-    if (error && error.code === "ENOENT") {
+  });
+}
+
+// Preserve Gavin's existing `npm start` / `npm run dev` browser workflow.
+if (require.main === module) {
+  startServer().catch(error => {
+    if (error && error.code === "ENOENT" && !USE_LOCAL_HTTP) {
       console.error(`HTTPS certificates were not found. Expected ${path.join(CERTS_DIR, TLS_KEY_FILE)} and ${path.join(CERTS_DIR, TLS_CERT_FILE)}.`);
     }
     console.error(error);
     process.exitCode = 1;
-  }
+  });
 }
 
-startServer();
+// Keep the historical CommonJS export compatible: callers that required the
+// Express app still receive the app, with startServer added as a helper.
+app.startServer = startServer;
 module.exports = app;
