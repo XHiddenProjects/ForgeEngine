@@ -83,9 +83,7 @@ const SESSION_COOKIE = "forge_session";
 const sessionCookieOptions = () => ({
   httpOnly: true,
   sameSite: "strict",
-  // Desktop mode uses HTTP only on the loopback interface. Browser/dev mode
-  // remains HTTPS and therefore keeps Secure cookies exactly as before.
-  secure: process.env.FORGE_LOCAL_HTTP !== "1",
+  secure: true,
   path: "/"
 });
 
