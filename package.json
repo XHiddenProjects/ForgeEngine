@@ -25,7 +25,7 @@
     "localtunnel": "^2.0.2",
     "opentype.js": "^2.0.0",
     "three": "^0.186.1",
-    "ws": "^8.18.0"
+    "ws": "^8.22.0"
   },
   "overrides": {
     "axios": "^1.7.9"
