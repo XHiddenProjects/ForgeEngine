@@ -5,6 +5,6 @@
     "description":"Forge Engines utility packages",
     "license":"MIT",
     "dependencies": {
-        "ws": "^8.18.0"
+        "ws": "^8.22.0"
     }
 }
